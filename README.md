@@ -1,3 +1,5 @@
+![keenetic-mcp: control your Keenetic router from any MCP agent. Safe by default, changes are not saved unless you ask. Nothing on the router: no USB, no Entware, no firmware mods. Works on any Keenetic, with features adapting to your model and firmware.](https://raw.githubusercontent.com/salatmaster/keenetic-mcp/main/docs/banner.png)
+
 # keenetic-mcp
 
 **Control your Keenetic router from Claude, Codex, Cursor, or any MCP agent.**
