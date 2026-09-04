@@ -247,6 +247,12 @@ function terminalSource(): LineSource {
   };
 }
 
+/** Visible fields are trimmed; hidden secrets preserve every character except CRLF framing. */
+export function normalisePipedAnswer(line: string, echo: boolean): string {
+  const withoutCr = line.endsWith('\r') ? line.slice(0, -1) : line;
+  return echo ? withoutCr.trim() : withoutCr;
+}
+
 /**
  * Answers from a stream that was read to the end up front.
  *
@@ -261,12 +267,12 @@ async function pipedSource(): Promise<LineSource> {
   const lines = Buffer.concat(chunks).toString('utf8').split('\n');
   let index = 0;
   return {
-    async ask(question) {
+    async ask(question, echo) {
       process.stdout.write(question);
       const line = lines[index] ?? '';
       index += 1;
       process.stdout.write('\n');
-      return line.trim();
+      return normalisePipedAnswer(line, echo);
     },
     close: () => {}
   };
