@@ -59,8 +59,15 @@ async function main(): Promise<void> {
   if (storedConfig) {
     stored.host = storedConfig.host;
     stored.login = storedConfig.login;
-    const secret = await store.read(`${storedConfig.login}@${storedConfig.host}`);
-    if (secret !== null) stored.password = secret;
+
+    // Environment credentials have the documented highest precedence. Do not
+    // touch the local secret store (or trigger legacy migration) when the
+    // password is supplied by the environment, which is common in CI/containers
+    // where no desktop keychain is available.
+    if (process.env['KEENETIC_PASSWORD'] === undefined) {
+      const secret = await store.read(`${storedConfig.login}@${storedConfig.host}`);
+      if (secret !== null) stored.password = secret;
+    }
   }
 
   const config = await loadConfig(process.argv.slice(2), process.env, stored);
