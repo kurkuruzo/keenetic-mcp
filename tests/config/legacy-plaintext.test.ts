@@ -14,7 +14,7 @@ function dpapiRunner(secret = 'active-password'): Runner {
 }
 
 describe('legacy plaintext cleanup', () => {
-  it('removes the whole legacy file after migrating the single active profile', async () => {
+  it('keeps legacy credentials during migration and removes the whole file only on explicit commit', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-legacy-'));
     await writeFile(
       join(dir, 'secrets.json'),
@@ -32,6 +32,12 @@ describe('legacy plaintext cleanup', () => {
     expect(protectedFile).toContain('encrypted-active-password');
     expect(protectedFile).not.toContain('active-password');
     expect(protectedFile).not.toContain('orphaned-old-password');
+
+    const legacyBeforeCommit = await readFile(join(dir, 'secrets.json'), 'utf8');
+    expect(legacyBeforeCommit).toContain('active-password');
+    expect(legacyBeforeCommit).toContain('orphaned-old-password');
+
+    await store.purgeLegacy();
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
   });
 });
