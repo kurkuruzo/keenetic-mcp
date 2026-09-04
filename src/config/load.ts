@@ -21,16 +21,16 @@ export function flagValue(argv: readonly string[], name: string): string | undef
 }
 
 /**
- * A stored password is valid only for the stored host/login pair it was keyed
- * under. Never reuse it when an environment variable or CLI flag redirects the
- * connection to a different router or user.
+ * True only when the final router identity still matches the stored identity.
+ * A stored password is scoped to that exact host/login pair and must never be
+ * reused when an environment variable or CLI flag redirects the connection.
  */
-export function storedPasswordApplies(
+export function storedIdentityMatches(
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
   stored?: StoredCredentials
 ): boolean {
-  if (!stored?.password) return false;
+  if (!stored?.host) return false;
 
   const host = env['KEENETIC_HOST'] ?? flagValue(argv, '--host') ?? stored.host;
   const login = env['KEENETIC_USER'] ?? stored.login ?? 'admin';
@@ -52,7 +52,8 @@ export async function loadConfig(
   const host = env['KEENETIC_HOST'] ?? flagValue(argv, '--host') ?? stored?.host;
   const login = env['KEENETIC_USER'] ?? stored?.login ?? 'admin';
   const password =
-    env['KEENETIC_PASSWORD'] ?? (storedPasswordApplies(argv, env, stored) ? stored?.password : undefined);
+    env['KEENETIC_PASSWORD'] ??
+    (storedIdentityMatches(argv, env, stored) ? stored?.password : undefined);
 
   const rawMax = flagValue(argv, '--max-response-bytes');
   const parsedMax = rawMax === undefined ? DEFAULT_MAX_RESPONSE_BYTES : Number.parseInt(rawMax, 10);
