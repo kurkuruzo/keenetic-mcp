@@ -170,6 +170,24 @@ describe('createSecretStore', () => {
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
   });
 
+  it('removes legacy plaintext when a Windows DPAPI credential already exists', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(
+      join(dir, 'secrets.dpapi.json'),
+      `${JSON.stringify({ 'admin@192.0.2.1': 'encrypted-dpapi-blob' })}\n`,
+      'utf8'
+    );
+    await writeFile(
+      join(dir, 'secrets.json'),
+      `${JSON.stringify({ 'admin@192.0.2.1': 'hunter2' })}\n`,
+      'utf8'
+    );
+    const store = createSecretStore('win32', dpapiRunner(), dir);
+
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+  });
+
   it('migrates a legacy Linux password into the system keychain and deletes the old file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     await writeFile(
