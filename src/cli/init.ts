@@ -35,6 +35,20 @@ export interface InitDeps {
   verify: (host: string, login: string, password: string) => Promise<VerifyOk | VerifyFailed>;
 }
 
+async function restoreCredential(
+  store: SecretStore,
+  account: string,
+  previous: string | null
+): Promise<boolean> {
+  try {
+    if (previous === null) await store.remove(account);
+    else await store.save(account, previous);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The whole flow, with every side effect injected, so it is tested without a
  * router, a terminal or a keychain. Nothing is written until the credentials
@@ -62,8 +76,60 @@ export async function runInit(deps: InitDeps): Promise<number> {
   }
   deps.out(`${result.model}, KeeneticOS ${result.firmware}, ${result.components} components`);
 
-  const path = await writeStoredConfig(deps.configDir, { host, login });
-  const where = await deps.store.save(`${login}@${host}`, password);
+  const account = `${login}@${host}`;
+
+  // Keep the prior value so any later failure can restore an existing working
+  // installation. read() may migrate an old plaintext value into secure storage,
+  // but legacy cleanup is deliberately deferred until config.json is committed.
+  let previous: string | null;
+  try {
+    previous = await deps.store.read(account);
+  } catch (error) {
+    deps.out('');
+    deps.out(`Could not read the existing credential securely: ${(error as Error).message}`);
+    deps.out('No configuration was changed.');
+    return 1;
+  }
+
+  let where: string;
+  try {
+    where = await deps.store.save(account, password);
+  } catch (error) {
+    const restored = await restoreCredential(deps.store, account, previous);
+    deps.out('');
+    deps.out(`Could not store the password securely: ${(error as Error).message}`);
+    deps.out('No plaintext credential file was written.');
+    if (!restored) {
+      deps.out('WARNING: the previous secure credential could not be restored automatically.');
+    }
+    return 1;
+  }
+
+  let path: string;
+  try {
+    path = await writeStoredConfig(deps.configDir, { host, login });
+  } catch (error) {
+    const restored = await restoreCredential(deps.store, account, previous);
+    deps.out('');
+    deps.out(`Could not write settings: ${(error as Error).message}`);
+    deps.out(
+      restored
+        ? 'The previous secure credential was restored and the legacy file was left untouched.'
+        : 'WARNING: the previous secure credential could not be restored automatically.'
+    );
+    return 1;
+  }
+
+  // The new secure credential and config.json now agree. Only at this point is
+  // it safe to delete the old plaintext fallback, including orphaned old entries.
+  try {
+    await deps.store.purgeLegacy();
+  } catch (error) {
+    deps.out('');
+    deps.out(`WARNING: settings were saved, but the legacy plaintext credential file could not be removed: ${(error as Error).message}`);
+    deps.out('Remove the legacy secrets.json manually before considering the migration complete.');
+    return 1;
+  }
 
   deps.out('');
   deps.out(`Password stored in ${where}`);
@@ -181,6 +247,12 @@ function terminalSource(): LineSource {
   };
 }
 
+/** Visible fields are trimmed; hidden secrets preserve every character except CRLF framing. */
+export function normalisePipedAnswer(line: string, echo: boolean): string {
+  const withoutCr = line.endsWith('\r') ? line.slice(0, -1) : line;
+  return echo ? withoutCr.trim() : withoutCr;
+}
+
 /**
  * Answers from a stream that was read to the end up front.
  *
@@ -195,12 +267,12 @@ async function pipedSource(): Promise<LineSource> {
   const lines = Buffer.concat(chunks).toString('utf8').split('\n');
   let index = 0;
   return {
-    async ask(question) {
+    async ask(question, echo) {
       process.stdout.write(question);
       const line = lines[index] ?? '';
       index += 1;
       process.stdout.write('\n');
-      return line.trim();
+      return normalisePipedAnswer(line, echo);
     },
     close: () => {}
   };
