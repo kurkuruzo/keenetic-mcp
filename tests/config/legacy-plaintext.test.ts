@@ -4,11 +4,15 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createSecretStore, type Runner } from '../../src/config/secrets.js';
 
+const DPAPI_BLOB = Buffer.from('encrypted-active-password', 'utf8').toString('base64');
+
 function dpapiRunner(secret = 'active-password'): Runner {
   return vi.fn(async (_command: string, args: string[]) => {
     const script = args.at(-1) ?? '';
-    if (script.includes('::Protect(')) return { code: 0, stdout: 'encrypted-active-password' };
-    if (script.includes('::Unprotect(')) return { code: 0, stdout: secret };
+    if (script.includes('::Protect(')) return { code: 0, stdout: DPAPI_BLOB };
+    if (script.includes('::Unprotect(')) {
+      return { code: 0, stdout: Buffer.from(secret, 'utf8').toString('base64') };
+    }
     return { code: 1, stdout: '' };
   }) as unknown as Runner;
 }
@@ -29,7 +33,7 @@ describe('legacy plaintext cleanup', () => {
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('active-password');
 
     const protectedFile = await readFile(join(dir, 'secrets.dpapi.json'), 'utf8');
-    expect(protectedFile).toContain('encrypted-active-password');
+    expect(protectedFile).toContain(DPAPI_BLOB);
     expect(protectedFile).not.toContain('active-password');
     expect(protectedFile).not.toContain('orphaned-old-password');
 
