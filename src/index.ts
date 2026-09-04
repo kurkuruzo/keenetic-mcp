@@ -56,6 +56,7 @@ async function main(): Promise<void> {
   // Assigned conditionally: exactOptionalPropertyTypes rejects an explicit
   // undefined for an optional property.
   const stored: StoredCredentials = {};
+  let loadedStoredSecret = false;
   if (storedConfig) {
     stored.host = storedConfig.host;
     stored.login = storedConfig.login;
@@ -66,11 +67,21 @@ async function main(): Promise<void> {
     // where no desktop keychain is available.
     if (process.env['KEENETIC_PASSWORD'] === undefined) {
       const secret = await store.read(`${storedConfig.login}@${storedConfig.host}`);
-      if (secret !== null) stored.password = secret;
+      if (secret !== null) {
+        stored.password = secret;
+        loadedStoredSecret = true;
+      }
     }
   }
 
   const config = await loadConfig(process.argv.slice(2), process.env, stored);
+
+  // read() may have migrated the active password from a legacy plaintext file,
+  // but it intentionally leaves that file untouched until configuration is
+  // known to resolve successfully. At that point every remaining legacy entry
+  // is orphaned because only one stored profile is supported.
+  if (loadedStoredSecret) await store.purgeLegacy();
+
   const client = createClient({
     host: config.host,
     login: config.login,
