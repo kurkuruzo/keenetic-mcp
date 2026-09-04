@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -152,6 +152,60 @@ describe('createSecretStore', () => {
 
     await store.save('admin@192.0.2.1', 'hunter2');
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
+  });
+
+  it('migrates a legacy plaintext Windows password into DPAPI and deletes the old file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(
+      join(dir, 'secrets.json'),
+      `${JSON.stringify({ 'admin@192.0.2.1': 'hunter2' })}\n`,
+      'utf8'
+    );
+    const store = createSecretStore('win32', dpapiRunner(), dir);
+
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
+    const stored = await readFile(join(dir, 'secrets.dpapi.json'), 'utf8');
+    expect(stored).toContain('encrypted-dpapi-blob');
+    expect(stored).not.toContain('hunter2');
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('migrates a legacy Linux password into the system keychain and deletes the old file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(
+      join(dir, 'secrets.json'),
+      `${JSON.stringify({ 'admin@192.0.2.1': 'hunter2' })}\n`,
+      'utf8'
+    );
+
+    let stored = false;
+    const spy = vi.fn(async (_command: string, args: string[]) => {
+      if (args[0] === 'lookup') {
+        return stored ? { code: 0, stdout: 'hunter2\n' } : { code: 1, stdout: '' };
+      }
+      if (args[0] === 'store') {
+        stored = true;
+        return { code: 0, stdout: '' };
+      }
+      return { code: 0, stdout: '' };
+    });
+    const store = createSecretStore('linux', spy as unknown as Runner, dir);
+
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('does not keep using a legacy plaintext password if the secure store is unavailable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(
+      join(dir, 'secrets.json'),
+      `${JSON.stringify({ 'admin@192.0.2.1': 'hunter2' })}\n`,
+      'utf8'
+    );
+    const failing = vi.fn().mockRejectedValue(new Error('ENOENT'));
+    const store = createSecretStore('linux', failing as unknown as Runner, dir);
+
+    await expect(store.read('admin@192.0.2.1')).rejects.toThrow(/system keychain/i);
   });
 
   it('removes Windows DPAPI entries', async () => {
