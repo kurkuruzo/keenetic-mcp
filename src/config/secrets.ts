@@ -102,31 +102,23 @@ export function keychainCommand(
 }
 
 export function windowsDpapiCommand(op: 'protect' | 'unprotect'): KeychainCommand {
-  // powershell.exe inherits a legacy console code page on many Windows systems.
-  // Node writes/reads UTF-8 pipes, so pin both sides explicitly to avoid corrupting
-  // non-ASCII router passwords before they reach DPAPI or after unprotecting them.
-  const encoding = [
-    '$utf8 = New-Object System.Text.UTF8Encoding($false)',
-    '[Console]::InputEncoding = $utf8',
-    '[Console]::OutputEncoding = $utf8'
-  ];
+  // The pipe carries Base64 only. This avoids relying on the legacy console code
+  // page used by powershell.exe and preserves arbitrary UTF-8 router passwords.
   const script =
     op === 'protect'
       ? [
           "$ErrorActionPreference = 'Stop'",
-          ...encoding,
-          '$plain = [Console]::In.ReadToEnd()',
-          '$bytes = [System.Text.Encoding]::UTF8.GetBytes($plain)',
+          '$plainB64 = [Console]::In.ReadToEnd().Trim()',
+          '$bytes = [Convert]::FromBase64String($plainB64)',
           '$protected = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
           '[Console]::Out.Write([Convert]::ToBase64String($protected))'
         ].join('; ')
       : [
           "$ErrorActionPreference = 'Stop'",
-          ...encoding,
           '$cipher = [Console]::In.ReadToEnd().Trim()',
           '$bytes = [Convert]::FromBase64String($cipher)',
           '$plain = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
-          '[Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($plain))'
+          '[Console]::Out.Write([Convert]::ToBase64String($plain))'
         ].join('; ');
 
   return {
@@ -144,6 +136,17 @@ function stripCommandLineEnding(value: string): string {
   if (value.endsWith('\r\n')) return value.slice(0, -2);
   if (value.endsWith('\n')) return value.slice(0, -1);
   return value;
+}
+
+function isBase64(value: string): boolean {
+  if (value.length === 0) return true;
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
+function decodeBase64Utf8(value: string): string {
+  const encoded = value.trim();
+  if (!isBase64(encoded)) throw new Error('Windows DPAPI returned invalid Base64 data');
+  return Buffer.from(encoded, 'base64').toString('utf8');
 }
 
 async function readSecretFile(path: string): Promise<Record<string, string>> {
@@ -223,9 +226,10 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
 
   async function protect(secret: string): Promise<string> {
     const cmd = windowsDpapiCommand('protect');
-    const { code, stdout } = await run(cmd.command, cmd.args, secret);
+    const encoded = Buffer.from(secret, 'utf8').toString('base64');
+    const { code, stdout } = await run(cmd.command, cmd.args, encoded);
     const cipher = stdout.trim();
-    if (code !== 0 || cipher.length === 0) {
+    if (code !== 0 || cipher.length === 0 || !isBase64(cipher)) {
       throw new Error('Windows DPAPI failed to protect the password');
     }
     return cipher;
@@ -235,7 +239,7 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     const cmd = windowsDpapiCommand('unprotect');
     const { code, stdout } = await run(cmd.command, cmd.args, cipher);
     if (code !== 0) throw new Error('Windows DPAPI failed to unprotect the password');
-    return stdout;
+    return decodeBase64Utf8(stdout);
   }
 
   async function saveSecure(account: string, secret: string): Promise<string> {
@@ -285,7 +289,13 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
       try {
         await saveSecure(account, legacy);
       } catch (error) {
-        await removeSecure(account).catch(() => undefined);
+        try {
+          await removeSecure(account);
+        } catch (cleanupError) {
+          throw new Error(
+            `Secure migration failed and the partial DPAPI credential could not be removed: ${(cleanupError as Error).message}; original error: ${(error as Error).message}`
+          );
+        }
         throw error;
       }
       return legacy;
@@ -310,20 +320,32 @@ export function createSecretStore(
       const { code, stdout } = await run(cmd.command, cmd.args);
       if (code !== 0) return null;
       return stripCommandLineEnding(stdout);
-    } catch {
-      // Missing or inaccessible keychain is reported by save().
-      return null;
+    } catch (error) {
+      throw new Error(
+        `Could not read the password from the system keychain: ${(error as Error).message}`
+      );
     }
   }
 
   async function removeSecure(account: string): Promise<void> {
     const cmd = keychainCommand(platform, 'remove', account);
     if (!cmd) return;
+
+    let code: number;
     try {
-      await run(cmd.command, cmd.args);
-    } catch {
-      // Removal is idempotent. Legacy cleanup is a separate transaction.
+      ({ code } = await run(cmd.command, cmd.args));
+    } catch (error) {
+      throw new Error(
+        `Could not remove the password from the system keychain: ${(error as Error).message}`
+      );
     }
+    if (code === 0) return;
+
+    // Some keychain tools return a non-zero status when the entry is already
+    // absent. Verify before treating that as a rollback failure.
+    const remaining = await readKeychain(account);
+    if (remaining === null) return;
+    throw new Error('Could not remove the password from the system keychain');
   }
 
   async function saveSecure(account: string, secret: string): Promise<string> {
@@ -364,7 +386,13 @@ export function createSecretStore(
       try {
         await saveSecure(account, legacy);
       } catch (error) {
-        await removeSecure(account);
+        try {
+          await removeSecure(account);
+        } catch (cleanupError) {
+          throw new Error(
+            `Secure migration failed and the partial keychain credential could not be removed: ${(cleanupError as Error).message}; original error: ${(error as Error).message}`
+          );
+        }
         throw error;
       }
       return legacy;
