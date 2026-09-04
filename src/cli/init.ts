@@ -63,6 +63,19 @@ export async function runInit(deps: InitDeps): Promise<number> {
   deps.out(`${result.model}, KeeneticOS ${result.firmware}, ${result.components} components`);
 
   const account = `${login}@${host}`;
+
+  // Keep the previous credential in memory so a failed settings write can
+  // restore an existing working installation instead of deleting its password.
+  let previous: string | null;
+  try {
+    previous = await deps.store.read(account);
+  } catch (error) {
+    deps.out('');
+    deps.out(`Could not read the existing credential securely: ${(error as Error).message}`);
+    deps.out('Nothing was changed.');
+    return 1;
+  }
+
   let where: string;
   try {
     where = await deps.store.save(account, password);
@@ -77,9 +90,15 @@ export async function runInit(deps: InitDeps): Promise<number> {
   try {
     path = await writeStoredConfig(deps.configDir, { host, login });
   } catch (error) {
-    // Avoid leaving an orphaned credential if writing the non-secret settings
-    // fails after the secure store has accepted the password.
-    await deps.store.remove(account).catch(() => undefined);
+    // Roll back only what this init run changed. If an account already existed,
+    // restore its previous value; otherwise remove the newly-created credential.
+    try {
+      if (previous === null) await deps.store.remove(account);
+      else await deps.store.save(account, previous);
+    } catch {
+      // Preserve the original settings-write error. The secure-store failure is
+      // secondary and must not hide why init could not complete.
+    }
     throw error;
   }
 
