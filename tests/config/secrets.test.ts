@@ -60,6 +60,13 @@ describe('windowsDpapiCommand', () => {
     expect(cmd.args.join(' ')).toContain('CurrentUser');
   });
 
+  it('pins PowerShell stdin and stdout to UTF-8', () => {
+    const script = windowsDpapiCommand('protect').args.join(' ');
+    expect(script).toContain('UTF8Encoding');
+    expect(script).toContain('InputEncoding');
+    expect(script).toContain('OutputEncoding');
+  });
+
   it('never puts the password in argv', () => {
     const cmd = windowsDpapiCommand('protect');
     expect(cmd.args.join(' ')).not.toContain('hunter2');
@@ -80,6 +87,14 @@ describe('createSecretStore', () => {
 
     await expect(store.save('admin@192.0.2.1', secret)).resolves.toMatch(/keychain/i);
     await expect(store.read('admin@192.0.2.1')).resolves.toBe(secret);
+  });
+
+  it('preserves an empty native keychain password instead of treating it as missing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    const store = createSecretStore('linux', runner({ code: 0, stdout: '\n' }), dir);
+
+    await expect(store.save('admin@192.0.2.1', '')).resolves.toMatch(/keychain/i);
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe('');
   });
 
   it('returns null when the keychain has no entry', async () => {
@@ -111,10 +126,17 @@ describe('createSecretStore', () => {
 
   it('fails closed when the keychain claims success but stored nothing', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
-    const lying = vi.fn().mockResolvedValue({ code: 0, stdout: '' });
-    const store = createSecretStore('darwin', lying as unknown as Runner, dir);
+    let calls = 0;
+    const lying = vi.fn(async (_command: string, args: string[]) => {
+      calls += 1;
+      if (args[0] === 'store') return { code: 0, stdout: '' };
+      if (args[0] === 'lookup') return { code: 1, stdout: '' };
+      return { code: 0, stdout: '' };
+    });
+    const store = createSecretStore('linux', lying as unknown as Runner, dir);
 
     await expect(store.save('admin@192.0.2.1', 'hunter2')).rejects.toThrow(/no plaintext/i);
+    expect(calls).toBeGreaterThanOrEqual(2);
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
   });
 
@@ -154,6 +176,15 @@ describe('createSecretStore', () => {
     expect(stored).toContain('encrypted-dpapi-blob');
     expect(stored).not.toContain('hunter2');
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('round-trips a non-ASCII Windows password through the DPAPI store abstraction', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    const secret = 'Пароль-ä-密码';
+    const store = createSecretStore('win32', dpapiRunner(secret), dir);
+
+    await expect(store.save('admin@192.0.2.1', secret)).resolves.toMatch(/DPAPI/i);
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe(secret);
   });
 
   it('reads Windows passwords through DPAPI', async () => {
@@ -226,6 +257,38 @@ describe('createSecretStore', () => {
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
     await store.purgeLegacy();
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('clears a partially-created native credential when legacy migration verification fails', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(
+      join(dir, 'secrets.json'),
+      `${JSON.stringify({ 'admin@192.0.2.1': 'hunter2' })}\n`,
+      'utf8'
+    );
+
+    let stored = false;
+    let cleared = false;
+    const spy = vi.fn(async (_command: string, args: string[]) => {
+      if (args[0] === 'lookup') {
+        return stored ? { code: 0, stdout: 'wrong-password\n' } : { code: 1, stdout: '' };
+      }
+      if (args[0] === 'store') {
+        stored = true;
+        return { code: 0, stdout: '' };
+      }
+      if (args[0] === 'clear') {
+        cleared = true;
+        stored = false;
+        return { code: 0, stdout: '' };
+      }
+      return { code: 1, stdout: '' };
+    });
+    const store = createSecretStore('linux', spy as unknown as Runner, dir);
+
+    await expect(store.read('admin@192.0.2.1')).rejects.toThrow(/plaintext|verify|keychain/i);
+    expect(cleared).toBe(true);
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
   });
 
   it('does not keep using a legacy plaintext password if the secure store is unavailable', async () => {
