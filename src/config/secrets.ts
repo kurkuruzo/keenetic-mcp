@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 const SERVICE = 'keenetic-mcp';
 const WINDOWS_SECRET_FILE = 'secrets.dpapi.json';
+const LEGACY_SECRET_FILE = 'secrets.json';
 
 export type Runner = (
   command: string,
@@ -131,31 +132,65 @@ function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
+async function readSecretFile(path: string): Promise<Record<string, string>> {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`${path} does not contain an object`);
+    }
+
+    const entries = Object.entries(parsed);
+    if (!entries.every(([, value]) => typeof value === 'string')) {
+      throw new Error(`${path} contains an invalid credential entry`);
+    }
+    return Object.fromEntries(entries) as Record<string, string>;
+  } catch (error) {
+    if (isEnoent(error)) return {};
+    throw error;
+  }
+}
+
+async function writeSecretFile(path: string, all: Record<string, string>): Promise<void> {
+  await mkdir(join(path, '..'), { recursive: true });
+  await writeFile(path, `${JSON.stringify(all, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600
+  });
+  await chmod(path, 0o600);
+}
+
+async function readLegacySecret(configDir: string, account: string): Promise<string | null> {
+  const all = await readSecretFile(join(configDir, LEGACY_SECRET_FILE));
+  return all[account] ?? null;
+}
+
+async function removeLegacySecret(configDir: string, account: string): Promise<void> {
+  const path = join(configDir, LEGACY_SECRET_FILE);
+  const all = await readSecretFile(path);
+  if (!(account in all)) return;
+
+  delete all[account];
+  if (Object.keys(all).length === 0) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+    }
+    return;
+  }
+
+  await writeSecretFile(path, all);
+}
+
 function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
   const protectedFile = join(configDir, WINDOWS_SECRET_FILE);
 
   async function readAll(): Promise<Record<string, string>> {
-    try {
-      const parsed = JSON.parse(await readFile(protectedFile, 'utf8')) as unknown;
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error(`${WINDOWS_SECRET_FILE} does not contain an object`);
-      }
-      return parsed as Record<string, string>;
-    } catch (error) {
-      if (isEnoent(error)) return {};
-      throw error;
-    }
+    return readSecretFile(protectedFile);
   }
 
   async function writeAll(all: Record<string, string>): Promise<void> {
-    await mkdir(configDir, { recursive: true });
-    await writeFile(protectedFile, `${JSON.stringify(all, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    // On POSIX this also protects tests/cross-mounted profiles. On Windows the
-    // confidentiality guarantee comes from DPAPI CurrentUser, not this mode.
-    await chmod(protectedFile, 0o600);
+    await writeSecretFile(protectedFile, all);
   }
 
   async function protect(secret: string): Promise<string> {
@@ -175,43 +210,54 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     return stdout;
   }
 
-  return {
-    async save(account, secret) {
-      const cipher = await protect(secret);
-      // Verify before committing the ciphertext to disk. This catches machines
-      // where PowerShell returned success but DPAPI is not actually usable.
-      if ((await unprotect(cipher)) !== secret) {
-        throw new Error('Windows DPAPI verification failed; password was not saved');
-      }
+  async function saveSecure(account: string, secret: string): Promise<string> {
+    const cipher = await protect(secret);
+    // Verify before committing the ciphertext to disk. This catches machines
+    // where PowerShell returned success but DPAPI is not actually usable.
+    if ((await unprotect(cipher)) !== secret) {
+      throw new Error('Windows DPAPI verification failed; password was not saved');
+    }
 
-      const all = await readAll();
-      all[account] = cipher;
-      await writeAll(all);
-      return 'Windows DPAPI (CurrentUser)';
-    },
+    const all = await readAll();
+    all[account] = cipher;
+    await writeAll(all);
+    await removeLegacySecret(configDir, account);
+    return 'Windows DPAPI (CurrentUser)';
+  }
+
+  return {
+    save: saveSecure,
 
     async read(account) {
       const all = await readAll();
       const cipher = all[account];
-      if (cipher === undefined) return null;
-      return unprotect(cipher);
+      if (cipher !== undefined) return unprotect(cipher);
+
+      // One-time migration from versions that wrote plaintext secrets.json.
+      // Never continue using the legacy file: migration must succeed securely.
+      const legacy = await readLegacySecret(configDir, account);
+      if (legacy === null) return null;
+      await saveSecure(account, legacy);
+      return legacy;
     },
 
     async remove(account) {
       const all = await readAll();
-      if (!(account in all)) return;
-      delete all[account];
+      if (account in all) {
+        delete all[account];
 
-      if (Object.keys(all).length === 0) {
-        try {
-          await unlink(protectedFile);
-        } catch (error) {
-          if (!isEnoent(error)) throw error;
+        if (Object.keys(all).length === 0) {
+          try {
+            await unlink(protectedFile);
+          } catch (error) {
+            if (!isEnoent(error)) throw error;
+          }
+        } else {
+          await writeAll(all);
         }
-        return;
       }
 
-      await writeAll(all);
+      await removeLegacySecret(configDir, account);
     }
   };
 }
@@ -231,48 +277,60 @@ export function createSecretStore(
       if (code === 0 && stdout.trim().length > 0) return stdout.trim();
     } catch {
       // Missing or inaccessible keychain is reported by save(); reads simply
-      // behave as if no stored credential exists.
+      // behave as if no stored credential exists unless migration is required.
     }
     return null;
   }
 
-  return {
-    async save(account, secret) {
-      const cmd = keychainCommand(platform, 'save', account);
-      if (!cmd) throw new Error(`No secure credential store is available on ${platform}`);
+  async function saveSecure(account: string, secret: string): Promise<string> {
+    const cmd = keychainCommand(platform, 'save', account);
+    if (!cmd) throw new Error(`No secure credential store is available on ${platform}`);
 
-      try {
-        const args = cmd.secretVia === 'argv' ? [...cmd.args, secret] : cmd.args;
-        const stdin = cmd.secretVia === 'stdin' ? secret : undefined;
-        const { code } = await run(cmd.command, args, stdin);
-        // Exit code 0 is not proof: confirm that the value can be read back.
-        if (code === 0 && (await readKeychain(account)) === secret) {
-          return 'the system keychain';
-        }
-      } catch (error) {
-        throw new Error(
-          `Could not store the password in the system keychain: ${(error as Error).message}`
-        );
+    try {
+      const args = cmd.secretVia === 'argv' ? [...cmd.args, secret] : cmd.args;
+      const stdin = cmd.secretVia === 'stdin' ? secret : undefined;
+      const { code } = await run(cmd.command, args, stdin);
+      // Exit code 0 is not proof: confirm that the value can be read back.
+      if (code === 0 && (await readKeychain(account)) === secret) {
+        await removeLegacySecret(configDir, account);
+        return 'the system keychain';
       }
-
+    } catch (error) {
       throw new Error(
-        'Could not verify the password in the system keychain; no plaintext fallback was written'
+        `Could not store the password in the system keychain: ${(error as Error).message}`
       );
-    },
+    }
+
+    throw new Error(
+      'Could not verify the password in the system keychain; no plaintext fallback was written'
+    );
+  }
+
+  return {
+    save: saveSecure,
 
     async read(account) {
-      return readKeychain(account);
+      const fromKeychain = await readKeychain(account);
+      if (fromKeychain !== null) return fromKeychain;
+
+      // Migrate old plaintext fallback data if present. If the secure store is
+      // unavailable, saveSecure throws rather than silently using plaintext.
+      const legacy = await readLegacySecret(configDir, account);
+      if (legacy === null) return null;
+      await saveSecure(account, legacy);
+      return legacy;
     },
 
     async remove(account) {
       const cmd = keychainCommand(platform, 'remove', account);
-      if (!cmd) return;
-      try {
-        await run(cmd.command, cmd.args);
-      } catch {
-        // Removal is idempotent. A missing keychain or missing entry needs no
-        // fallback cleanup because plaintext fallback storage no longer exists.
+      if (cmd) {
+        try {
+          await run(cmd.command, cmd.args);
+        } catch {
+          // Removal is idempotent. Legacy cleanup below is still attempted.
+        }
       }
+      await removeLegacySecret(configDir, account);
     }
   };
 }
