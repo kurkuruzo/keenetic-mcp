@@ -10,6 +10,7 @@ import {
 } from '../../src/config/secrets.js';
 
 const SERVICE = 'keenetic-mcp';
+const DPAPI_BLOB = Buffer.from('encrypted-dpapi-blob', 'utf8').toString('base64');
 
 function runner(result: { code: number; stdout: string }): Runner {
   return vi.fn().mockResolvedValue(result) as unknown as Runner;
@@ -18,8 +19,10 @@ function runner(result: { code: number; stdout: string }): Runner {
 function dpapiRunner(secret = 'hunter2'): Runner {
   return vi.fn(async (_command: string, args: string[]) => {
     const script = args.at(-1) ?? '';
-    if (script.includes('::Protect(')) return { code: 0, stdout: 'encrypted-dpapi-blob' };
-    if (script.includes('::Unprotect(')) return { code: 0, stdout: secret };
+    if (script.includes('::Protect(')) return { code: 0, stdout: DPAPI_BLOB };
+    if (script.includes('::Unprotect(')) {
+      return { code: 0, stdout: Buffer.from(secret, 'utf8').toString('base64') };
+    }
     return { code: 1, stdout: '' };
   }) as unknown as Runner;
 }
@@ -60,11 +63,13 @@ describe('windowsDpapiCommand', () => {
     expect(cmd.args.join(' ')).toContain('CurrentUser');
   });
 
-  it('pins PowerShell stdin and stdout to UTF-8', () => {
-    const script = windowsDpapiCommand('protect').args.join(' ');
-    expect(script).toContain('UTF8Encoding');
-    expect(script).toContain('InputEncoding');
-    expect(script).toContain('OutputEncoding');
+  it('uses Base64 for both sides of the PowerShell pipe', () => {
+    const protect = windowsDpapiCommand('protect').args.join(' ');
+    const unprotect = windowsDpapiCommand('unprotect').args.join(' ');
+    expect(protect).toContain('FromBase64String');
+    expect(protect).toContain('ToBase64String');
+    expect(unprotect).toContain('FromBase64String');
+    expect(unprotect).toContain('ToBase64String');
   });
 
   it('never puts the password in argv', () => {
@@ -101,6 +106,13 @@ describe('createSecretStore', () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     const store = createSecretStore('darwin', runner({ code: 44, stdout: '' }), dir);
     await expect(store.read('admin@192.0.2.1')).resolves.toBeNull();
+  });
+
+  it('reports a missing native keychain executable instead of treating it as no entry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    const failing = vi.fn().mockRejectedValue(new Error('ENOENT'));
+    const store = createSecretStore('linux', failing as unknown as Runner, dir);
+    await expect(store.read('admin@192.0.2.1')).rejects.toThrow(/system keychain/i);
   });
 
   it('passes the secret on stdin where the platform supports it', async () => {
@@ -173,9 +185,32 @@ describe('createSecretStore', () => {
 
     await expect(store.save('admin@192.0.2.1', 'hunter2')).resolves.toMatch(/DPAPI/i);
     const stored = await readFile(join(dir, 'secrets.dpapi.json'), 'utf8');
-    expect(stored).toContain('encrypted-dpapi-blob');
+    expect(stored).toContain(DPAPI_BLOB);
     expect(stored).not.toContain('hunter2');
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('sends Windows plaintext to PowerShell only as Base64 UTF-8', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    const secret = 'Пароль-ä-密码';
+    const encoded = Buffer.from(secret, 'utf8').toString('base64');
+    const spy = vi.fn(async (_command: string, args: string[], stdin?: string) => {
+      const script = args.at(-1) ?? '';
+      if (script.includes('::Protect(')) {
+        expect(stdin).toBe(encoded);
+        expect(stdin).not.toContain(secret);
+        return { code: 0, stdout: DPAPI_BLOB };
+      }
+      if (script.includes('::Unprotect(')) {
+        expect(stdin).toBe(DPAPI_BLOB);
+        return { code: 0, stdout: encoded };
+      }
+      return { code: 1, stdout: '' };
+    });
+    const store = createSecretStore('win32', spy as unknown as Runner, dir);
+
+    await expect(store.save('admin@192.0.2.1', secret)).resolves.toMatch(/DPAPI/i);
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe(secret);
   });
 
   it('round-trips a non-ASCII Windows password through the DPAPI store abstraction', async () => {
@@ -206,7 +241,7 @@ describe('createSecretStore', () => {
 
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
     const stored = await readFile(join(dir, 'secrets.dpapi.json'), 'utf8');
-    expect(stored).toContain('encrypted-dpapi-blob');
+    expect(stored).toContain(DPAPI_BLOB);
     expect(stored).not.toContain('hunter2');
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
 
@@ -218,7 +253,7 @@ describe('createSecretStore', () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     await writeFile(
       join(dir, 'secrets.dpapi.json'),
-      `${JSON.stringify({ 'admin@192.0.2.1': 'encrypted-dpapi-blob' })}\n`,
+      `${JSON.stringify({ 'admin@192.0.2.1': DPAPI_BLOB })}\n`,
       'utf8'
     );
     await writeFile(
@@ -289,6 +324,22 @@ describe('createSecretStore', () => {
     await expect(store.read('admin@192.0.2.1')).rejects.toThrow(/plaintext|verify|keychain/i);
     expect(cleared).toBe(true);
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
+  });
+
+  it('does not report a failed native cleanup as successful', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    let stored = true;
+    const spy = vi.fn(async (_command: string, args: string[]) => {
+      if (args[0] === 'clear') return { code: 1, stdout: '' };
+      if (args[0] === 'lookup') {
+        return stored ? { code: 0, stdout: 'still-there\n' } : { code: 1, stdout: '' };
+      }
+      return { code: 0, stdout: '' };
+    });
+    const store = createSecretStore('linux', spy as unknown as Runner, dir);
+
+    await expect(store.remove('admin@192.0.2.1')).rejects.toThrow(/remove.*system keychain/i);
+    expect(stored).toBe(true);
   });
 
   it('does not keep using a legacy plaintext password if the secure store is unavailable', async () => {
