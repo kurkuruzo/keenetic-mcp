@@ -5,7 +5,11 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { runInitFromTerminal } from './cli/init.js';
 import { configDir, readStoredConfig } from './config/discover.js';
-import { loadConfig, type StoredCredentials } from './config/load.js';
+import {
+  loadConfig,
+  storedIdentityMatches,
+  type StoredCredentials
+} from './config/load.js';
 import { createSecretStore, spawnRunner } from './config/secrets.js';
 import { createBackupGuard } from './router/backup.js';
 import { createClient } from './router/client.js';
@@ -32,40 +36,36 @@ export function createServer(ctx: ToolContext): McpServer {
 }
 
 async function main(): Promise<void> {
-  // Before anything reads the environment, so a checkout can keep its router
-  // credentials in .env instead of exporting them. A no-op once installed.
   loadLocalEnv();
 
-  // Before the config is read, so it answers on a machine that has never been
-  // set up. Every bug report starts by asking which version is running.
   if (process.argv.includes('--version') || process.argv.includes('-v')) {
     process.stdout.write(`${resolveVersion()}\n`);
     return;
   }
 
-  // `init` is a subcommand rather than a second binary, so the published
-  // surface stays a single command.
   if (process.argv[2] === 'init') {
     process.exit(await runInitFromTerminal());
   }
 
+  const argv = process.argv.slice(2);
   const dir = configDir(process.platform, process.env);
   const storedConfig = await readStoredConfig(dir);
   const store = createSecretStore(process.platform, spawnRunner, dir);
 
-  // Assigned conditionally: exactOptionalPropertyTypes rejects an explicit
-  // undefined for an optional property.
   const stored: StoredCredentials = {};
   let loadedStoredSecret = false;
   if (storedConfig) {
     stored.host = storedConfig.host;
     stored.login = storedConfig.login;
 
-    // Environment credentials have the documented highest precedence. Do not
-    // touch the local secret store (or trigger legacy migration) when the
-    // password is supplied by the environment, which is common in CI/containers
-    // where no desktop keychain is available.
-    if (process.env['KEENETIC_PASSWORD'] === undefined) {
+    // A local password is scoped to the exact stored host/login pair. If an
+    // environment variable or --host redirects the connection, do not even read
+    // (or migrate) the local secret: doing so could pair a router password with
+    // a different target and leak it on the next authentication attempt.
+    if (
+      process.env['KEENETIC_PASSWORD'] === undefined &&
+      storedIdentityMatches(argv, process.env, stored)
+    ) {
       const secret = await store.read(`${storedConfig.login}@${storedConfig.host}`);
       if (secret !== null) {
         stored.password = secret;
@@ -74,12 +74,8 @@ async function main(): Promise<void> {
     }
   }
 
-  const config = await loadConfig(process.argv.slice(2), process.env, stored);
+  const config = await loadConfig(argv, process.env, stored);
 
-  // read() may have migrated the active password from a legacy plaintext file,
-  // but it intentionally leaves that file untouched until configuration is
-  // known to resolve successfully. At that point every remaining legacy entry
-  // is orphaned because only one stored profile is supported.
   if (loadedStoredSecret) await store.purgeLegacy();
 
   const client = createClient({
@@ -97,14 +93,6 @@ async function main(): Promise<void> {
   await createServer(ctx).connect(new StdioServerTransport());
 }
 
-/**
- * True when this module is the program being run, rather than imported.
- *
- * The entry path has to be resolved through symlinks first: npm installs a bin
- * as a symlink in node_modules/.bin, so under `npx keenetic-mcp` argv[1] is the
- * link and import.meta.url is its target. Comparing them unresolved never
- * matches, and the server exits silently without ever starting.
- */
 function isProgramEntry(): boolean {
   const entry = process.argv[1];
   if (entry === undefined) return false;
@@ -117,7 +105,6 @@ function isProgramEntry(): boolean {
 
 if (isProgramEntry()) {
   main().catch((error: unknown) => {
-    // stderr only: stdout carries the MCP protocol stream.
     process.stderr.write(`keenetic-mcp failed to start: ${(error as Error).message}\n`);
     process.exit(1);
   });
