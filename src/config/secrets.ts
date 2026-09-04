@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 const SERVICE = 'keenetic-mcp';
@@ -101,10 +102,19 @@ export function keychainCommand(
 }
 
 export function windowsDpapiCommand(op: 'protect' | 'unprotect'): KeychainCommand {
+  // powershell.exe inherits a legacy console code page on many Windows systems.
+  // Node writes/reads UTF-8 pipes, so pin both sides explicitly to avoid corrupting
+  // non-ASCII router passwords before they reach DPAPI or after unprotecting them.
+  const encoding = [
+    '$utf8 = New-Object System.Text.UTF8Encoding($false)',
+    '[Console]::InputEncoding = $utf8',
+    '[Console]::OutputEncoding = $utf8'
+  ];
   const script =
     op === 'protect'
       ? [
           "$ErrorActionPreference = 'Stop'",
+          ...encoding,
           '$plain = [Console]::In.ReadToEnd()',
           '$bytes = [System.Text.Encoding]::UTF8.GetBytes($plain)',
           '$protected = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
@@ -112,6 +122,7 @@ export function windowsDpapiCommand(op: 'protect' | 'unprotect'): KeychainComman
         ].join('; ')
       : [
           "$ErrorActionPreference = 'Stop'",
+          ...encoding,
           '$cipher = [Console]::In.ReadToEnd().Trim()',
           '$bytes = [Convert]::FromBase64String($cipher)',
           '$plain = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
@@ -155,11 +166,25 @@ async function readSecretFile(path: string): Promise<Record<string, string>> {
 
 async function writeSecretFile(path: string, all: Record<string, string>): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(all, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600
-  });
-  await chmod(path, 0o600);
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(all, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+    await chmod(temporary, 0o600);
+    await rename(temporary, path);
+  } catch (error) {
+    try {
+      await unlink(temporary);
+    } catch (cleanupError) {
+      if (!isEnoent(cleanupError)) {
+        // The original write error is more important; a leftover temp file
+        // contains DPAPI ciphertext only, not a plaintext router password.
+      }
+    }
+    throw error;
+  }
 }
 
 function legacySecretPath(configDir: string): string {
@@ -225,6 +250,23 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     return 'Windows DPAPI (CurrentUser)';
   }
 
+  async function removeSecure(account: string): Promise<void> {
+    const all = await readAll();
+    if (!(account in all)) return;
+    delete all[account];
+
+    if (Object.keys(all).length === 0) {
+      try {
+        await unlink(protectedFile);
+      } catch (error) {
+        if (!isEnoent(error)) throw error;
+      }
+      return;
+    }
+
+    await writeAll(all);
+  }
+
   return {
     save: saveSecure,
 
@@ -235,30 +277,21 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
 
       // Migrate the active legacy value into secure storage, but deliberately
       // keep the legacy file until the caller has successfully resolved/written
-      // the configuration that makes this account active.
+      // the configuration that makes this account active. If migration fails,
+      // make a best effort to leave no new secure entry that could shadow the
+      // still-valid legacy credential on the next start.
       const legacy = await readLegacySecret(configDir, account);
       if (legacy === null) return null;
-      await saveSecure(account, legacy);
+      try {
+        await saveSecure(account, legacy);
+      } catch (error) {
+        await removeSecure(account).catch(() => undefined);
+        throw error;
+      }
       return legacy;
     },
 
-    async remove(account) {
-      const all = await readAll();
-      if (!(account in all)) return;
-      delete all[account];
-
-      if (Object.keys(all).length === 0) {
-        try {
-          await unlink(protectedFile);
-        } catch (error) {
-          if (!isEnoent(error)) throw error;
-        }
-        return;
-      }
-
-      await writeAll(all);
-    },
-
+    remove: removeSecure,
     purgeLegacy: () => purgeLegacySecrets(configDir)
   };
 }
@@ -281,6 +314,16 @@ export function createSecretStore(
     } catch {
       // Missing or inaccessible keychain is reported by save().
       return null;
+    }
+  }
+
+  async function removeSecure(account: string): Promise<void> {
+    const cmd = keychainCommand(platform, 'remove', account);
+    if (!cmd) return;
+    try {
+      await run(cmd.command, cmd.args);
+    } catch {
+      // Removal is idempotent. Legacy cleanup is a separate transaction.
     }
   }
 
@@ -315,22 +358,20 @@ export function createSecretStore(
 
       // Migrate the active legacy value into secure storage, but keep the
       // plaintext file until the caller has committed its configuration state.
+      // No secure value existed before this branch, so on a failed migration we
+      // remove any partially-created native entry and keep the legacy file.
       const legacy = await readLegacySecret(configDir, account);
       if (legacy === null) return null;
-      await saveSecure(account, legacy);
+      try {
+        await saveSecure(account, legacy);
+      } catch (error) {
+        await removeSecure(account);
+        throw error;
+      }
       return legacy;
     },
 
-    async remove(account) {
-      const cmd = keychainCommand(platform, 'remove', account);
-      if (!cmd) return;
-      try {
-        await run(cmd.command, cmd.args);
-      } catch {
-        // Removal is idempotent. Legacy cleanup is a separate transaction.
-      }
-    },
-
+    remove: removeSecure,
     purgeLegacy: () => purgeLegacySecrets(configDir)
   };
 }
