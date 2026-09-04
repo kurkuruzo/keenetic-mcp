@@ -42,8 +42,6 @@ describe('keychainCommand', () => {
     expect(keychainCommand('win32', 'read', 'admin@192.0.2.1')).toBeNull();
   });
 
-  // stdin is preferred because argv is readable by other processes of the same
-  // user. macOS leaves no choice: `security` takes the password as an argument.
   it('declares stdin wherever the native tool supports it', () => {
     expect(keychainCommand('linux', 'save', 'a')?.secretVia).toBe('stdin');
   });
@@ -73,6 +71,15 @@ describe('createSecretStore', () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     const store = createSecretStore('darwin', runner({ code: 0, stdout: 'hunter2\n' }), dir);
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
+  });
+
+  it('preserves leading and trailing spaces in native keychain passwords', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    const secret = '  hunter2  ';
+    const store = createSecretStore('linux', runner({ code: 0, stdout: `${secret}\n` }), dir);
+
+    await expect(store.save('admin@192.0.2.1', secret)).resolves.toMatch(/keychain/i);
+    await expect(store.read('admin@192.0.2.1')).resolves.toBe(secret);
   });
 
   it('returns null when the keychain has no entry', async () => {
@@ -126,12 +133,15 @@ describe('createSecretStore', () => {
     await expect(store.save('admin@192.0.2.1', 'hunter2')).resolves.toMatch(/keychain/i);
   });
 
-  it('removes a native keychain entry', async () => {
+  it('removes a native keychain entry without touching legacy plaintext', async () => {
     const spy = vi.fn().mockResolvedValue({ code: 0, stdout: '' });
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(join(dir, 'secrets.json'), '{"old@router":"old"}\n', 'utf8');
     const store = createSecretStore('darwin', spy as unknown as Runner, dir);
     await store.remove('admin@192.0.2.1');
+
     expect((spy.mock.calls[0]![1] as string[]).join(' ')).toContain('delete-generic-password');
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('old@router');
   });
 
   it('stores Windows passwords only as DPAPI ciphertext', async () => {
@@ -154,7 +164,7 @@ describe('createSecretStore', () => {
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
   });
 
-  it('migrates a legacy plaintext Windows password into DPAPI and deletes the old file', async () => {
+  it('migrates a legacy Windows password securely but defers plaintext deletion', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     await writeFile(
       join(dir, 'secrets.json'),
@@ -167,10 +177,13 @@ describe('createSecretStore', () => {
     const stored = await readFile(join(dir, 'secrets.dpapi.json'), 'utf8');
     expect(stored).toContain('encrypted-dpapi-blob');
     expect(stored).not.toContain('hunter2');
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
+
+    await store.purgeLegacy();
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
   });
 
-  it('removes legacy plaintext when a Windows DPAPI credential already exists', async () => {
+  it('does not delete legacy plaintext just because a Windows DPAPI credential exists', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     await writeFile(
       join(dir, 'secrets.dpapi.json'),
@@ -185,10 +198,10 @@ describe('createSecretStore', () => {
     const store = createSecretStore('win32', dpapiRunner(), dir);
 
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
-    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
   });
 
-  it('migrates a legacy Linux password into the system keychain and deletes the old file', async () => {
+  it('migrates a legacy Linux password into the keychain but defers plaintext deletion', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
     await writeFile(
       join(dir, 'secrets.json'),
@@ -210,6 +223,8 @@ describe('createSecretStore', () => {
     const store = createSecretStore('linux', spy as unknown as Runner, dir);
 
     await expect(store.read('admin@192.0.2.1')).resolves.toBe('hunter2');
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
+    await store.purgeLegacy();
     await expect(readFile(join(dir, 'secrets.json'), 'utf8')).rejects.toThrow();
   });
 
@@ -224,10 +239,12 @@ describe('createSecretStore', () => {
     const store = createSecretStore('linux', failing as unknown as Runner, dir);
 
     await expect(store.read('admin@192.0.2.1')).rejects.toThrow(/system keychain/i);
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('hunter2');
   });
 
-  it('removes Windows DPAPI entries', async () => {
+  it('removes Windows DPAPI entries without purging legacy plaintext', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kn-sec-'));
+    await writeFile(join(dir, 'secrets.json'), '{"old@router":"old"}\n', 'utf8');
     const store = createSecretStore('win32', dpapiRunner(), dir);
 
     await store.save('a@192.0.2.1', 'hunter2');
@@ -235,5 +252,6 @@ describe('createSecretStore', () => {
 
     await expect(store.read('a@192.0.2.1')).resolves.toBeNull();
     await expect(readFile(join(dir, 'secrets.dpapi.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(dir, 'secrets.json'), 'utf8')).resolves.toContain('old@router');
   });
 });
