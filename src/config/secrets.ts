@@ -231,7 +231,11 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     async read(account) {
       const all = await readAll();
       const cipher = all[account];
-      if (cipher !== undefined) return unprotect(cipher);
+      if (cipher !== undefined) {
+        const secret = await unprotect(cipher);
+        await removeLegacySecret(configDir, account);
+        return secret;
+      }
 
       // One-time migration from versions that wrote plaintext secrets.json.
       // Never continue using the legacy file: migration must succeed securely.
@@ -311,7 +315,10 @@ export function createSecretStore(
 
     async read(account) {
       const fromKeychain = await readKeychain(account);
-      if (fromKeychain !== null) return fromKeychain;
+      if (fromKeychain !== null) {
+        await removeLegacySecret(configDir, account);
+        return fromKeychain;
+      }
 
       // Migrate old plaintext fallback data if present. If the secure store is
       // unavailable, saveSecure throws rather than silently using plaintext.
