@@ -8,13 +8,28 @@ that can talk to this server can reconfigure the network it runs on.
 
 ## Where the password goes
 
-The setup wizard stores the router password in the operating system keychain -
-Keychain Services on macOS, Credential Manager on Windows, Secret Service on
-Linux. If no keychain is available it falls back to a file with mode `0600` and
-says so rather than pretending otherwise.
+The setup wizard stores the router password using an operating-system protected
+credential store:
 
-The password is never written to a settings file, never included in a tool
-response, and never logged. `KEENETIC_HOST`, `KEENETIC_USER` and
+- macOS: Keychain Services;
+- Windows: DPAPI with `CurrentUser` scope. Only DPAPI ciphertext is stored on
+  disk in `secrets.dpapi.json`;
+- Linux: Secret Service via `secret-tool`.
+
+There is no plaintext credential fallback. If the operating-system protected
+store is unavailable, cannot store the password, or cannot read the stored value
+back for verification, setup fails closed and no plaintext password file is
+created.
+
+Older versions could fall back to `<configDir>/secrets.json` with mode `0600`.
+When such a legacy entry is found, the server performs a one-time migration: it
+first stores and verifies the password in the current protected store and only
+then removes that legacy plaintext entry. If secure migration cannot complete,
+the legacy entry is not deleted and is not silently used as the long-term
+credential store.
+
+The password is never written to the normal settings file, never included in a
+tool response, and never logged. `KEENETIC_HOST`, `KEENETIC_USER` and
 `KEENETIC_PASSWORD` override the stored values, which is what a container wants.
 
 ## What it does not do
