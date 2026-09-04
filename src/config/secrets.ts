@@ -309,8 +309,7 @@ export function createSecretStore(
     try {
       const { code, stdout } = await run(cmd.command, cmd.args);
       if (code !== 0) return null;
-      const secret = stripCommandLineEnding(stdout);
-      return secret.length > 0 ? secret : null;
+      return stripCommandLineEnding(stdout);
     } catch {
       // Missing or inaccessible keychain is reported by save().
       return null;
