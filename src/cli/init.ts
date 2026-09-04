@@ -62,8 +62,26 @@ export async function runInit(deps: InitDeps): Promise<number> {
   }
   deps.out(`${result.model}, KeeneticOS ${result.firmware}, ${result.components} components`);
 
-  const path = await writeStoredConfig(deps.configDir, { host, login });
-  const where = await deps.store.save(`${login}@${host}`, password);
+  const account = `${login}@${host}`;
+  let where: string;
+  try {
+    where = await deps.store.save(account, password);
+  } catch (error) {
+    deps.out('');
+    deps.out(`Could not store the password securely: ${(error as Error).message}`);
+    deps.out('No plaintext credential file was written.');
+    return 1;
+  }
+
+  let path: string;
+  try {
+    path = await writeStoredConfig(deps.configDir, { host, login });
+  } catch (error) {
+    // Avoid leaving an orphaned credential if writing the non-secret settings
+    // fails after the secure store has accepted the password.
+    await deps.store.remove(account).catch(() => undefined);
+    throw error;
+  }
 
   deps.out('');
   deps.out(`Password stored in ${where}`);
