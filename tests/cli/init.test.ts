@@ -77,6 +77,23 @@ describe('runInit', () => {
     expect(out.join('\n')).toMatch(/rejected|401/i);
   });
 
+  it('fails closed and writes no settings when secure password storage fails', async () => {
+    const { deps, out, dir } = await makeDeps({
+      store: {
+        save: vi.fn(async () => {
+          throw new Error('secure store unavailable');
+        }),
+        read: vi.fn(async () => null),
+        remove: vi.fn(async () => undefined)
+      }
+    });
+
+    await expect(runInit(deps)).resolves.toBe(1);
+    await expect(readStoredConfig(dir)).resolves.toBeNull();
+    expect(out.join('\n')).toMatch(/store the password securely/i);
+    expect(out.join('\n')).toMatch(/no plaintext/i);
+  });
+
   it('takes the host the user types over the discovered one', async () => {
     const { deps } = await makeDeps({ prompt: vi.fn(async () => '198.51.100.7') });
     await runInit(deps);
