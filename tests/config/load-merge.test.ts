@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../../src/config/load.js';
+import { loadConfig, storedIdentityMatches } from '../../src/config/load.js';
 
 const STORED = { host: '198.51.100.1', login: 'stored-user', password: 'stored-pass' };
 
@@ -13,8 +13,6 @@ describe('loadConfig precedence', () => {
     });
   });
 
-  // Containers and CI have no keychain, so the environment has to win over
-  // whatever happens to be configured on a developer machine.
   it('lets the environment override every stored value', async () => {
     const cfg = await loadConfig(
       [],
@@ -28,18 +26,54 @@ describe('loadConfig precedence', () => {
     expect(cfg).toMatchObject({ host: '192.0.2.9', login: 'env-user', password: 'env-pass' });
   });
 
-  it('lets --host override a stored host', async () => {
-    const cfg = await loadConfig(['--host', '192.0.2.5'], {} as NodeJS.ProcessEnv, STORED);
-    expect(cfg.host).toBe('192.0.2.5');
+  it('does not reuse the stored password when --host points at another router', async () => {
+    await expect(
+      loadConfig(['--host', '192.0.2.5'], {} as NodeJS.ProcessEnv, STORED)
+    ).rejects.toThrow(/KEENETIC_PASSWORD|init/);
   });
 
-  it('lets the environment beat the flag', async () => {
+  it('does not reuse the stored password when KEENETIC_HOST points at another router', async () => {
+    await expect(
+      loadConfig([], { KEENETIC_HOST: '192.0.2.9' } as NodeJS.ProcessEnv, STORED)
+    ).rejects.toThrow(/KEENETIC_PASSWORD|init/);
+  });
+
+  it('does not reuse the stored password for another login', async () => {
+    await expect(
+      loadConfig([], { KEENETIC_USER: 'other-user' } as NodeJS.ProcessEnv, STORED)
+    ).rejects.toThrow(/KEENETIC_PASSWORD|init/);
+  });
+
+  it('allows a redirected host when an explicit environment password is supplied', async () => {
     const cfg = await loadConfig(
       ['--host', '192.0.2.5'],
-      { KEENETIC_HOST: '192.0.2.9' } as NodeJS.ProcessEnv,
+      { KEENETIC_PASSWORD: 'env-pass' } as NodeJS.ProcessEnv,
+      STORED
+    );
+    expect(cfg).toMatchObject({
+      host: '192.0.2.5',
+      login: 'stored-user',
+      password: 'env-pass'
+    });
+  });
+
+  it('lets the environment beat the flag when the environment supplies credentials', async () => {
+    const cfg = await loadConfig(
+      ['--host', '192.0.2.5'],
+      { KEENETIC_HOST: '192.0.2.9', KEENETIC_PASSWORD: 'env-pass' } as NodeJS.ProcessEnv,
       STORED
     );
     expect(cfg.host).toBe('192.0.2.9');
+  });
+
+  it('identifies whether a stored secret belongs to the final router identity', () => {
+    expect(storedIdentityMatches([], {} as NodeJS.ProcessEnv, STORED)).toBe(true);
+    expect(
+      storedIdentityMatches(['--host', '192.0.2.5'], {} as NodeJS.ProcessEnv, STORED)
+    ).toBe(false);
+    expect(
+      storedIdentityMatches([], { KEENETIC_USER: 'other-user' } as NodeJS.ProcessEnv, STORED)
+    ).toBe(false);
   });
 
   it('points at the wizard when nothing is configured', async () => {
