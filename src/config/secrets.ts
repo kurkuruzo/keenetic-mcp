@@ -47,12 +47,7 @@ export const spawnRunner: Runner = (command, args, stdin) =>
     child.stdin.end(stdin ?? '');
   });
 
-/**
- * Native keychain commands for macOS and Linux.
- *
- * Windows is handled separately with DPAPI so no undeclared PowerShell helper
- * functions and no plaintext fallback file are required.
- */
+/** Native keychain commands for macOS and Linux. */
 export function keychainCommand(
   platform: NodeJS.Platform,
   op: 'save' | 'read' | 'remove',
@@ -159,27 +154,27 @@ async function writeSecretFile(path: string, all: Record<string, string>): Promi
   await chmod(path, 0o600);
 }
 
+function legacySecretPath(configDir: string): string {
+  return join(configDir, LEGACY_SECRET_FILE);
+}
+
 async function readLegacySecret(configDir: string, account: string): Promise<string | null> {
-  const all = await readSecretFile(join(configDir, LEGACY_SECRET_FILE));
+  const all = await readSecretFile(legacySecretPath(configDir));
   return all[account] ?? null;
 }
 
-async function removeLegacySecret(configDir: string, account: string): Promise<void> {
-  const path = join(configDir, LEGACY_SECRET_FILE);
-  const all = await readSecretFile(path);
-  if (!(account in all)) return;
-
-  delete all[account];
-  if (Object.keys(all).length === 0) {
-    try {
-      await unlink(path);
-    } catch (error) {
-      if (!isEnoent(error)) throw error;
-    }
-    return;
+/**
+ * Older releases could accumulate several plaintext credentials in one file,
+ * while the application itself stores only one active host/login in config.json.
+ * Once the active credential is known to exist in a secure store, every remaining
+ * entry in the legacy file is orphaned plaintext and should be removed together.
+ */
+async function purgeLegacySecrets(configDir: string): Promise<void> {
+  try {
+    await unlink(legacySecretPath(configDir));
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
   }
-
-  await writeSecretFile(path, all);
 }
 
 function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
@@ -212,8 +207,6 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
 
   async function saveSecure(account: string, secret: string): Promise<string> {
     const cipher = await protect(secret);
-    // Verify before committing the ciphertext to disk. This catches machines
-    // where PowerShell returned success but DPAPI is not actually usable.
     if ((await unprotect(cipher)) !== secret) {
       throw new Error('Windows DPAPI verification failed; password was not saved');
     }
@@ -221,7 +214,7 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     const all = await readAll();
     all[account] = cipher;
     await writeAll(all);
-    await removeLegacySecret(configDir, account);
+    await purgeLegacySecrets(configDir);
     return 'Windows DPAPI (CurrentUser)';
   }
 
@@ -233,12 +226,10 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
       const cipher = all[account];
       if (cipher !== undefined) {
         const secret = await unprotect(cipher);
-        await removeLegacySecret(configDir, account);
+        await purgeLegacySecrets(configDir);
         return secret;
       }
 
-      // One-time migration from versions that wrote plaintext secrets.json.
-      // Never continue using the legacy file: migration must succeed securely.
       const legacy = await readLegacySecret(configDir, account);
       if (legacy === null) return null;
       await saveSecure(account, legacy);
@@ -249,7 +240,6 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
       const all = await readAll();
       if (account in all) {
         delete all[account];
-
         if (Object.keys(all).length === 0) {
           try {
             await unlink(protectedFile);
@@ -260,8 +250,7 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
           await writeAll(all);
         }
       }
-
-      await removeLegacySecret(configDir, account);
+      await purgeLegacySecrets(configDir);
     }
   };
 }
@@ -280,8 +269,7 @@ export function createSecretStore(
       const { code, stdout } = await run(cmd.command, cmd.args);
       if (code === 0 && stdout.trim().length > 0) return stdout.trim();
     } catch {
-      // Missing or inaccessible keychain is reported by save(); reads simply
-      // behave as if no stored credential exists unless migration is required.
+      // Missing or inaccessible keychain is reported by save().
     }
     return null;
   }
@@ -294,9 +282,8 @@ export function createSecretStore(
       const args = cmd.secretVia === 'argv' ? [...cmd.args, secret] : cmd.args;
       const stdin = cmd.secretVia === 'stdin' ? secret : undefined;
       const { code } = await run(cmd.command, args, stdin);
-      // Exit code 0 is not proof: confirm that the value can be read back.
       if (code === 0 && (await readKeychain(account)) === secret) {
-        await removeLegacySecret(configDir, account);
+        await purgeLegacySecrets(configDir);
         return 'the system keychain';
       }
     } catch (error) {
@@ -316,12 +303,10 @@ export function createSecretStore(
     async read(account) {
       const fromKeychain = await readKeychain(account);
       if (fromKeychain !== null) {
-        await removeLegacySecret(configDir, account);
+        await purgeLegacySecrets(configDir);
         return fromKeychain;
       }
 
-      // Migrate old plaintext fallback data if present. If the secure store is
-      // unavailable, saveSecure throws rather than silently using plaintext.
       const legacy = await readLegacySecret(configDir, account);
       if (legacy === null) return null;
       await saveSecure(account, legacy);
@@ -337,7 +322,7 @@ export function createSecretStore(
           // Removal is idempotent. Legacy cleanup below is still attempted.
         }
       }
-      await removeLegacySecret(configDir, account);
+      await purgeLegacySecrets(configDir);
     }
   };
 }
