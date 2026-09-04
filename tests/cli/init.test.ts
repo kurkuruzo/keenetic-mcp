@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -130,5 +130,30 @@ describe('runInit', () => {
     });
     await runInit(deps);
     expect(order).toEqual(['verify', 'save']);
+  });
+
+  it('restores the prior credential when writing settings fails', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'kn-init-blocked-'));
+    const blocked = join(base, 'not-a-directory');
+    await writeFile(blocked, 'blocked', 'utf8');
+
+    let current = 'old-password';
+    const save = vi.fn(async (_account: string, secret: string) => {
+      current = secret;
+      return 'the system keychain';
+    });
+    const { deps } = await makeDeps({
+      configDir: blocked,
+      store: {
+        read: vi.fn(async () => current),
+        save,
+        remove: vi.fn(async () => undefined)
+      }
+    });
+
+    await expect(runInit(deps)).rejects.toThrow();
+    expect(current).toBe('old-password');
+    expect(save).toHaveBeenNthCalledWith(1, 'admin@192.0.2.1', 'hunter2');
+    expect(save).toHaveBeenNthCalledWith(2, 'admin@192.0.2.1', 'old-password');
   });
 });
