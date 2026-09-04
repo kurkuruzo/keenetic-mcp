@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { runInit, type InitDeps } from '../../src/cli/init.js';
+import { normalisePipedAnswer, runInit, type InitDeps } from '../../src/cli/init.js';
 import { readStoredConfig } from '../../src/config/discover.js';
 
 async function makeDeps(
@@ -33,6 +33,16 @@ async function makeDeps(
   };
   return { deps, out, dir };
 }
+
+describe('normalisePipedAnswer', () => {
+  it('trims visible fields and their CRLF framing', () => {
+    expect(normalisePipedAnswer('  admin  \r', true)).toBe('admin');
+  });
+
+  it('preserves password whitespace while removing only CRLF framing', () => {
+    expect(normalisePipedAnswer('  secret  \r', false)).toBe('  secret  ');
+  });
+});
 
 describe('runInit', () => {
   it('discovers, verifies and stores', async () => {
@@ -217,6 +227,27 @@ describe('runInit', () => {
     await expect(runInit(deps)).resolves.toBe(1);
     expect(remove).toHaveBeenCalledWith('newadmin@198.51.100.7');
     expect(purgeLegacy).not.toHaveBeenCalled();
+  });
+
+  it('warns when rollback cannot remove a newly-created secure credential', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'kn-init-remove-fail-'));
+    const blocked = join(base, 'not-a-directory');
+    await writeFile(blocked, 'blocked', 'utf8');
+
+    const { deps, out } = await makeDeps({
+      configDir: blocked,
+      store: {
+        read: vi.fn(async () => null),
+        save: vi.fn(async () => 'the system keychain'),
+        remove: vi.fn(async () => {
+          throw new Error('clear failed');
+        }),
+        purgeLegacy: vi.fn(async () => undefined)
+      }
+    });
+
+    await expect(runInit(deps)).resolves.toBe(1);
+    expect(out.join('\n')).toMatch(/could not be restored automatically/i);
   });
 
   it('reports incomplete migration if legacy plaintext cannot be removed after success', async () => {
