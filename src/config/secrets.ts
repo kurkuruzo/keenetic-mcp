@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const SERVICE = 'keenetic-mcp';
 const WINDOWS_SECRET_FILE = 'secrets.dpapi.json';
@@ -17,6 +17,8 @@ export interface SecretStore {
   save(account: string, secret: string): Promise<string>;
   read(account: string): Promise<string | null>;
   remove(account: string): Promise<void>;
+  /** Removes the old plaintext fallback only after the caller has committed config state. */
+  purgeLegacy(): Promise<void>;
 }
 
 /**
@@ -127,6 +129,12 @@ function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
+function stripCommandLineEnding(value: string): string {
+  if (value.endsWith('\r\n')) return value.slice(0, -2);
+  if (value.endsWith('\n')) return value.slice(0, -1);
+  return value;
+}
+
 async function readSecretFile(path: string): Promise<Record<string, string>> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
@@ -146,7 +154,7 @@ async function readSecretFile(path: string): Promise<Record<string, string>> {
 }
 
 async function writeSecretFile(path: string, all: Record<string, string>): Promise<void> {
-  await mkdir(join(path, '..'), { recursive: true });
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(all, null, 2)}\n`, {
     encoding: 'utf8',
     mode: 0o600
@@ -166,8 +174,8 @@ async function readLegacySecret(configDir: string, account: string): Promise<str
 /**
  * Older releases could accumulate several plaintext credentials in one file,
  * while the application itself stores only one active host/login in config.json.
- * Once the active credential is known to exist in a secure store, every remaining
- * entry in the legacy file is orphaned plaintext and should be removed together.
+ * The caller invokes this only after the active secure credential and config
+ * state are committed, so every remaining legacy entry is orphaned plaintext.
  */
 async function purgeLegacySecrets(configDir: string): Promise<void> {
   try {
@@ -214,7 +222,6 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     const all = await readAll();
     all[account] = cipher;
     await writeAll(all);
-    await purgeLegacySecrets(configDir);
     return 'Windows DPAPI (CurrentUser)';
   }
 
@@ -224,12 +231,11 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
     async read(account) {
       const all = await readAll();
       const cipher = all[account];
-      if (cipher !== undefined) {
-        const secret = await unprotect(cipher);
-        await purgeLegacySecrets(configDir);
-        return secret;
-      }
+      if (cipher !== undefined) return unprotect(cipher);
 
+      // Migrate the active legacy value into secure storage, but deliberately
+      // keep the legacy file until the caller has successfully resolved/written
+      // the configuration that makes this account active.
       const legacy = await readLegacySecret(configDir, account);
       if (legacy === null) return null;
       await saveSecure(account, legacy);
@@ -238,20 +244,22 @@ function createWindowsDpapiStore(run: Runner, configDir: string): SecretStore {
 
     async remove(account) {
       const all = await readAll();
-      if (account in all) {
-        delete all[account];
-        if (Object.keys(all).length === 0) {
-          try {
-            await unlink(protectedFile);
-          } catch (error) {
-            if (!isEnoent(error)) throw error;
-          }
-        } else {
-          await writeAll(all);
+      if (!(account in all)) return;
+      delete all[account];
+
+      if (Object.keys(all).length === 0) {
+        try {
+          await unlink(protectedFile);
+        } catch (error) {
+          if (!isEnoent(error)) throw error;
         }
+        return;
       }
-      await purgeLegacySecrets(configDir);
-    }
+
+      await writeAll(all);
+    },
+
+    purgeLegacy: () => purgeLegacySecrets(configDir)
   };
 }
 
@@ -267,11 +275,13 @@ export function createSecretStore(
     if (!cmd) return null;
     try {
       const { code, stdout } = await run(cmd.command, cmd.args);
-      if (code === 0 && stdout.trim().length > 0) return stdout.trim();
+      if (code !== 0) return null;
+      const secret = stripCommandLineEnding(stdout);
+      return secret.length > 0 ? secret : null;
     } catch {
       // Missing or inaccessible keychain is reported by save().
+      return null;
     }
-    return null;
   }
 
   async function saveSecure(account: string, secret: string): Promise<string> {
@@ -283,7 +293,6 @@ export function createSecretStore(
       const stdin = cmd.secretVia === 'stdin' ? secret : undefined;
       const { code } = await run(cmd.command, args, stdin);
       if (code === 0 && (await readKeychain(account)) === secret) {
-        await purgeLegacySecrets(configDir);
         return 'the system keychain';
       }
     } catch (error) {
@@ -302,11 +311,10 @@ export function createSecretStore(
 
     async read(account) {
       const fromKeychain = await readKeychain(account);
-      if (fromKeychain !== null) {
-        await purgeLegacySecrets(configDir);
-        return fromKeychain;
-      }
+      if (fromKeychain !== null) return fromKeychain;
 
+      // Migrate the active legacy value into secure storage, but keep the
+      // plaintext file until the caller has committed its configuration state.
       const legacy = await readLegacySecret(configDir, account);
       if (legacy === null) return null;
       await saveSecure(account, legacy);
@@ -315,14 +323,14 @@ export function createSecretStore(
 
     async remove(account) {
       const cmd = keychainCommand(platform, 'remove', account);
-      if (cmd) {
-        try {
-          await run(cmd.command, cmd.args);
-        } catch {
-          // Removal is idempotent. Legacy cleanup below is still attempted.
-        }
+      if (!cmd) return;
+      try {
+        await run(cmd.command, cmd.args);
+      } catch {
+        // Removal is idempotent. Legacy cleanup is a separate transaction.
       }
-      await purgeLegacySecrets(configDir);
-    }
+    },
+
+    purgeLegacy: () => purgeLegacySecrets(configDir)
   };
 }
