@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createSecretStore,
   keychainCommand,
+  spawnRunner,
   windowsDpapiCommand,
   type Runner
 } from '../../src/config/secrets.js';
@@ -55,6 +56,18 @@ describe('keychainCommand', () => {
 });
 
 describe('windowsDpapiCommand', () => {
+  it.skipIf(process.platform !== 'win32')('round-trips a password through native Windows DPAPI', async () => {
+    const encoded = Buffer.from('  test-пароль-🔑  ', 'utf8').toString('base64');
+    const protect = windowsDpapiCommand('protect');
+    const encrypted = await spawnRunner(protect.command, protect.args, encoded);
+    expect(encrypted.code).toBe(0);
+    expect(encrypted.stdout.trim()).not.toBe('');
+    const unprotect = windowsDpapiCommand('unprotect');
+    const decrypted = await spawnRunner(unprotect.command, unprotect.args, encrypted.stdout);
+    expect(decrypted.code).toBe(0);
+    expect(decrypted.stdout.trim()).toBe(encoded);
+  }, 15_000);
+
   it('uses PowerShell and DPAPI CurrentUser', () => {
     const cmd = windowsDpapiCommand('protect');
     expect(cmd.command).toBe('powershell.exe');

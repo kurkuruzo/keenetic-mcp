@@ -108,6 +108,7 @@ export function windowsDpapiCommand(op: 'protect' | 'unprotect'): KeychainComman
     op === 'protect'
       ? [
           "$ErrorActionPreference = 'Stop'",
+          'Add-Type -AssemblyName System.Security',
           '$plainB64 = [Console]::In.ReadToEnd().Trim()',
           '$bytes = [Convert]::FromBase64String($plainB64)',
           '$protected = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
@@ -115,6 +116,7 @@ export function windowsDpapiCommand(op: 'protect' | 'unprotect'): KeychainComman
         ].join('; ')
       : [
           "$ErrorActionPreference = 'Stop'",
+          'Add-Type -AssemblyName System.Security',
           '$cipher = [Console]::In.ReadToEnd().Trim()',
           '$bytes = [Convert]::FromBase64String($cipher)',
           '$plain = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)',

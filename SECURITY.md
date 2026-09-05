@@ -16,6 +16,9 @@ credential store:
   disk in `secrets.dpapi.json`;
 - Linux: Secret Service via `secret-tool`.
 
+On Windows, the server loads the `System.Security` assembly explicitly in its
+PowerShell helper before using DPAPI; no manual assembly setup is required.
+
 There is no plaintext credential fallback. If the operating-system protected
 store is unavailable, cannot store the password, or cannot read the stored value
 back for verification, setup fails closed and does not create a plaintext
