@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ясный шаг — прототип</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="demo">Интерактивный прототип · данные только в памяти вкладки · обновление страницы сбрасывает изменения</div>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#now"><span class="mark" aria-hidden="true">я</span>Ясный шаг</a>
+      <div class="personal">Личное пространство</div>
+      <nav id="navigation" aria-label="Основная навигация"></nav>
+      <div class="sidebar-bottom">Меньше держать в голове.<br>Один понятный шаг за раз.<a href="../README.md">О проекте и методике</a></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><span id="breadcrumb">Рабочее пространство</span><button class="primary" data-action="capture">＋ Записать мысль</button></header>
+      <main id="main" tabindex="-1"></main>
+    </div>
+  </div>
+  <nav id="mobile-navigation" aria-label="Навигация на телефоне"></nav>
+  <dialog id="modal"><div id="modal-content"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
