@@ -56,7 +56,7 @@
       const p=project(projectId);if(!p){$('main').innerHTML='<h1>Проект не найден</h1><a href="project.html">Открыть пример проекта</a>';return;}
       $('#project-name').textContent=p.name;$('#vision').textContent=p.vision;$('#target').textContent=p.target;
       const next=active().find(t=>t.projectId===p.id);
-      $('#next-step').innerHTML=next?`<button type="button" class="task-title" data-action="open-task" data-id="${next.id}">${escape(next.title)}</button><div class="row-controls"><span class="task-state">● В действиях</span><a class="text-link" href="actions.html">Открыть рабочую очередь</a></div>`:'<p>Выберите конкретную задачу ниже и добавьте её в действия.</p>';
+      $('#next-step').innerHTML=next?`<button type="button" class="task-title" data-action="open-task" data-id="${next.id}">${escape(next.title)}</button><div class="row-controls"><span class="task-state">● В действиях</span><button type="button" data-action="open-task" data-id="${next.id}">Изменить шаг</button><a class="text-link" href="actions.html">Открыть рабочую очередь</a></div>`:'<p>Выберите конкретную задачу ниже и добавьте её в действия.</p>';
       const plan=data.tasks.filter(t=>t.projectId===p.id&&!t.done),done=data.tasks.filter(t=>t.projectId===p.id&&t.done);
       $('#project-plan').innerHTML=plan.length?`<div class="task-list">${plan.map(t=>row(t,'plan')).join('')}</div>`:'<div class="empty"><p>Открытых задач нет. Можно уточнить целевое состояние и следующий шаг.</p></div>';
       $('#completed-summary').textContent=`Выполненные (${done.length})`;
@@ -95,7 +95,7 @@
     else if(a==='close-capture')close('#capture-dialog');
     else if(a==='close-task')close('#task-dialog');
     else if(a==='close-project')close('#project-dialog');
-    else if(a==='edit-project'){const p=project(projectId),f=$('#project-form');f.elements.vision.value=p.vision;f.elements.target.value=p.target;f.dataset.version=p.version;f.dataset.dirty='false';$('#project-error').textContent='';returnFocus=b;$('#project-dialog').showModal();}
+    else if(a==='edit-project'){const p=project(projectId),f=$('#project-form');for(const field of ['name','vision','target'])f.elements.namedItem(field).value=p[field];f.dataset.version=p.version;f.dataset.dirty='false';$('#project-error').textContent='';returnFocus=b;$('#project-dialog').showModal();f.elements.namedItem(['name','vision','target'].includes(b.dataset.field)?b.dataset.field:'name').focus();}
   });
   document.addEventListener('submit',async e=>{
     const f=e.target;if(!['task-form','capture-form','project-form'].includes(f.id))return;e.preventDefault();const values=new FormData(f),value=k=>String(values.get(k)||'').trim();
@@ -106,8 +106,8 @@
     }else if(f.id==='capture-form'){
       if(!value('text'))return;const ok=await mutate(latest=>{latest.inbox.push({id:crypto.randomUUID(),text:value('text')});});if(ok){f.reset();f.dataset.dirty='false';$('#capture-dialog').close();message('Мысль сохранена во входящие.');}
     }else{
-      if(!value('vision')||!value('target')){$('#project-error').textContent='Заполните оба поля.';return;}
-      const ok=await mutate(latest=>{const p=latest.projects.find(p=>p.id===projectId);if(p.version!==Number(f.dataset.version))throw Error('Проект изменился в другой вкладке. Сохраните свой текст и откройте редактор заново.');p.vision=value('vision');p.target=value('target');p.version++;});if(ok){f.dataset.dirty='false';$('#project-dialog').close();message('Направление проекта обновлено.');}
+      if(!value('name')||!value('vision')||!value('target')){$('#project-error').textContent='Заполните название и оба поля результата.';return;}
+      const ok=await mutate(latest=>{const p=latest.projects.find(p=>p.id===projectId);if(p.version!==Number(f.dataset.version))throw Error('Проект изменился в другой вкладке. Сохраните свой текст и откройте редактор заново.');p.name=value('name');p.vision=value('vision');p.target=value('target');p.version++;});if(ok){f.dataset.dirty='false';$('#project-dialog').close();message('Проект обновлён. Изменения видны и на экране действий.');}
     }
   });
   document.addEventListener('input',e=>{const f=e.target.closest('form');if(f)f.dataset.dirty='true';});
