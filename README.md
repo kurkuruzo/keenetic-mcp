@@ -94,6 +94,33 @@ operating system keychain. Only the address and login go in a settings file.
 Prefer environment variables? `KEENETIC_HOST`, `KEENETIC_USER` and
 `KEENETIC_PASSWORD` override everything, which is what you want in a container.
 
+### Multiple routers in one MCP connection
+
+Use one saved configuration directory per router. Run `keenetic-mcp init` for
+each directory with `KEENETIC_CONFIG_DIR` set to that directory. Then add one MCP
+entry whose command includes a `--profile name=directory` argument for each
+router. For example, a local Codex configuration on Windows can use:
+
+```toml
+[mcp_servers.keenetic-routers]
+command = 'C:\path\to\node.exe'
+args = [
+  'C:\path\to\keenetic-mcp\dist\index.js',
+  '--profile', 'office=C:\profiles\office',
+  '--profile', 'workshop=C:\profiles\workshop',
+]
+```
+
+Use absolute paths and unique lowercase profile names. Tools are named
+`office_get_system_info`, `workshop_list_devices`, and so on. The server loads
+each profile from its own saved settings and OS credential store on its first
+tool call. Discovery works even if a saved router is offline or its credentials
+need to be fixed. `--read-only` applies to every configured router.
+
+When you start the server with profile arguments, use the setup wizard to
+change each router's address or login. The single-router environment overrides
+apply only when the server starts without profile arguments.
+
 ## What it can do
 
 **Read**

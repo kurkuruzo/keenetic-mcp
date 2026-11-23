@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
-import { fail, guard, ok, type ToolContext, type ToolResult } from './registry.js';
+import { fail, guard, ok, toolName, type ToolScope, type ToolResult } from './registry.js';
 
 type RawBody = string | Record<string, unknown> | unknown[];
 
@@ -46,9 +46,9 @@ function decodeBody(body: RawBody): Decoded {
   return { ok: true, body: parsed };
 }
 
-export function registerRawTool(server: McpServer, ctx: ToolContext): void {
+export function registerRawTool(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'rci_call',
+    toolName(scope, 'rci_call'),
     {
       title: 'Call the router API directly',
       description:
@@ -80,11 +80,11 @@ export function registerRawTool(server: McpServer, ctx: ToolContext): void {
       },
       // In read-only mode POST is refused, so the tool genuinely cannot modify
       // anything and the annotation says so rather than overstating the risk.
-      annotations: ctx.readOnly
+      annotations: scope.readOnly
         ? { readOnlyHint: true, openWorldHint: false }
         : { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
     },
-    guard(async ({ method, path, body, max_bytes }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { method, path, body, max_bytes }): Promise<ToolResult> => {
       let payload: unknown;
 
       if (method === 'GET') {

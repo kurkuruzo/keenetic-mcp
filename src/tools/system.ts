@@ -1,14 +1,14 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { readConfigState } from '../router/config-state.js';
-import { guard, ok, READ_ONLY, type ToolContext } from './registry.js';
+import { guard, ok, READ_ONLY, toolName, type ToolScope } from './registry.js';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-export function registerSystemTools(server: McpServer, ctx: ToolContext): void {
+export function registerSystemTools(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'get_system_info',
+    toolName(scope, 'get_system_info'),
     {
       title: 'Router system information',
       description:
@@ -18,7 +18,7 @@ export function registerSystemTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: {},
       annotations: READ_ONLY
     },
-    guard(async () => {
+    guard(scope, async (ctx) => {
       const [caps, system] = await Promise.all([
         ctx.client.capabilities(),
         ctx.client.rci.get('show/system')
@@ -43,7 +43,7 @@ export function registerSystemTools(server: McpServer, ctx: ToolContext): void {
   );
 
   server.registerTool(
-    'get_config_state',
+    toolName(scope, 'get_config_state'),
     {
       title: 'Configuration state',
       description:
@@ -54,6 +54,6 @@ export function registerSystemTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: {},
       annotations: READ_ONLY
     },
-    guard(async () => ok(await readConfigState(ctx.client.rci)))
+    guard(scope, async (ctx) => ok(await readConfigState(ctx.client.rci)))
   );
 }

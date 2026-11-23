@@ -10,12 +10,12 @@ import {
   readSegment,
   teardownSegment
 } from '../router/segments.js';
-import { fail, guard, ok, READ_ONLY, type ToolContext, type ToolResult } from './registry.js';
+import { fail, guard, ok, READ_ONLY, toolName, type ToolScope, type ToolResult } from './registry.js';
 import { describeWrite } from './write.js';
 
-export function registerSegmentTools(server: McpServer, ctx: ToolContext): void {
+export function registerSegmentTools(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'list_segments',
+    toolName(scope, 'list_segments'),
     {
       title: 'List network segments',
       description:
@@ -25,7 +25,7 @@ export function registerSegmentTools(server: McpServer, ctx: ToolContext): void 
       inputSchema: {},
       annotations: READ_ONLY
     },
-    guard(async (): Promise<ToolResult> => {
+    guard(scope, async (ctx): Promise<ToolResult> => {
       const inventory = await readInventory(ctx.client.rci);
       const segments = [];
       for (const number of inventory.bridgeNumbers) {
@@ -50,10 +50,10 @@ export function registerSegmentTools(server: McpServer, ctx: ToolContext): void 
     })
   );
 
-  if (ctx.readOnly) return;
+  if (scope.readOnly) return;
 
   server.registerTool(
-    'create_segment',
+    toolName(scope, 'create_segment'),
     {
       title: 'Create a network segment',
       description:
@@ -96,7 +96,8 @@ export function registerSegmentTools(server: McpServer, ctx: ToolContext): void 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
     },
     guard(
-      async ({
+      scope,
+      async (ctx, {
         name,
         ssid,
         psk,
@@ -160,7 +161,7 @@ export function registerSegmentTools(server: McpServer, ctx: ToolContext): void 
   );
 
   server.registerTool(
-    'delete_segment',
+    toolName(scope, 'delete_segment'),
     {
       title: 'Delete a network segment',
       description:
@@ -173,7 +174,7 @@ export function registerSegmentTools(server: McpServer, ctx: ToolContext): void 
       },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
     },
-    guard(async ({ bridge }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { bridge }): Promise<ToolResult> => {
       if (bridge === HOME_BRIDGE) {
         return fail(
           new ValidationError(

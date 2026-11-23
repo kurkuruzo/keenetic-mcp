@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { describe, expect, it } from 'vitest';
 
 const DIST = fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -64,6 +67,37 @@ const CONFIGURED: NodeJS.ProcessEnv = {
  * 0.1.0 was broken.
  */
 describe('the built binary', () => {
+  it('advertises multiple profiles over one stdio connection before loading credentials', async () => {
+    const missing = join(tmpdir(), `keenetic-${randomUUID()}`);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        DIST,
+        '--profile', `first=${join(missing, 'first')}`,
+        '--profile', `second=${join(missing, 'second')}`,
+        '--read-only'
+      ],
+      env: {
+        KEENETIC_HOST: '192.0.2.1',
+        KEENETIC_PASSWORD: 'not-used-for-tools-list'
+      }
+    });
+    const client = new Client({ name: 'binary-test', version: '0.0.0' });
+    try {
+      await client.connect(transport);
+      const names = (await client.listTools()).tools.map(tool => tool.name);
+      expect(names).toContain('first_get_system_info');
+      expect(names).toContain('second_get_system_info');
+      expect(names).not.toContain('first_save_config');
+      expect(names).not.toContain('get_system_info');
+      const result = await client.callTool({ name: 'first_get_system_info', arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('first');
+    } finally {
+      await client.close();
+    }
+  });
+
   it('answers initialize when run by its own path', async () => {
     const result = await run(DIST, `${INITIALIZE}\n`, CONFIGURED);
     expect(result.stdout).toContain('"serverInfo"');

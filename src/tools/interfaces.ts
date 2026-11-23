@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { capList } from '../shape/budget.js';
 import { projectInterface } from '../shape/project.js';
-import { fail, guard, ok, READ_ONLY, type ToolContext, type ToolResult } from './registry.js';
+import { fail, guard, ok, READ_ONLY, toolName, type ToolContext, type ToolScope, type ToolResult } from './registry.js';
 import { describeWrite, verifiedWrite } from './write.js';
 
 type InterfaceKind = 'all' | 'wan' | 'lan' | 'wifi' | 'vpn' | 'bridge';
@@ -45,9 +45,9 @@ function matchesKind(id: string, record: Record<string, unknown>, kind: Interfac
   }
 }
 
-export function registerInterfaceTools(server: McpServer, ctx: ToolContext): void {
+export function registerInterfaceTools(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'list_interfaces',
+    toolName(scope, 'list_interfaces'),
     {
       title: 'List network interfaces',
       description:
@@ -67,7 +67,7 @@ export function registerInterfaceTools(server: McpServer, ctx: ToolContext): voi
       },
       annotations: READ_ONLY
     },
-    guard(async ({ kind, detail, limit }) => {
+    guard(scope, async (ctx, { kind, detail, limit }) => {
       const raw = await ctx.client.rci.get('show/interface');
       const all = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
 
@@ -95,7 +95,7 @@ export function registerInterfaceTools(server: McpServer, ctx: ToolContext): voi
   );
 
   server.registerTool(
-    'get_interface',
+    toolName(scope, 'get_interface'),
     {
       title: 'Get one interface in full',
       description:
@@ -106,7 +106,7 @@ export function registerInterfaceTools(server: McpServer, ctx: ToolContext): voi
       },
       annotations: READ_ONLY
     },
-    guard(async ({ name }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { name }): Promise<ToolResult> => {
       try {
         return ok(await readInterface(ctx, name));
       } catch (error) {
@@ -121,10 +121,10 @@ export function registerInterfaceTools(server: McpServer, ctx: ToolContext): voi
   );
 
   // A read-only server must not advertise what it will refuse to do.
-  if (ctx.readOnly) return;
+  if (scope.readOnly) return;
 
   server.registerTool(
-    'set_interface_state',
+    toolName(scope, 'set_interface_state'),
     {
       title: 'Bring an interface up or down',
       description:
@@ -137,7 +137,7 @@ export function registerInterfaceTools(server: McpServer, ctx: ToolContext): voi
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
     },
-    guard(async ({ name, state }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { name, state }): Promise<ToolResult> => {
       const snapshot = await ctx.backup.ensure();
       const body =
         state === 'up'

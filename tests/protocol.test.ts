@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
-import { createServer } from '../src/index.js';
+import { createMultiProfileServer, createServer } from '../src/index.js';
 import type { ToolContext } from '../src/tools/registry.js';
 import type { KeeneticClient } from '../src/router/client.js';
 import { stubBackup } from './helpers/backup.js';
@@ -32,11 +32,11 @@ const WRITE_TOOLS = [
   'delete_segment'
 ];
 
-function context(readOnly: boolean): ToolContext {
+function context(readOnly: boolean, model = 'Keenetic Model (KN-0000)'): ToolContext {
   const client = {
     rci: { get: vi.fn(async () => ({})), post: vi.fn(), getText: vi.fn() },
     capabilities: vi.fn(async () => ({
-      model: 'Keenetic Model (KN-0000)',
+      model,
       hwId: 'KN-0000',
       firmware: '5.1.3',
       components: new Set<string>(),
@@ -47,15 +47,49 @@ function context(readOnly: boolean): ToolContext {
 }
 
 /** Speaks real MCP to the assembled server over a linked in-memory transport. */
-async function connectedClient(readOnly = false): Promise<Client> {
+async function connectServer(server: ReturnType<typeof createServer>): Promise<Client> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createServer(context(readOnly));
   await server.connect(serverTransport);
 
   const client = new Client({ name: 'protocol-test', version: '0.0.0' });
   await client.connect(clientTransport);
   return client;
 }
+
+function connectedClient(readOnly = false): Promise<Client> {
+  return connectServer(createServer(context(readOnly)));
+}
+
+describe('multi-profile mode', () => {
+  it('initializes and caches each router independently, with retries after a load failure', async () => {
+    const first = vi.fn(async () => context(false, 'First router'));
+    const second = vi.fn(async () => context(false, 'Second router'))
+      .mockRejectedValueOnce(new Error('Profile temporarily unavailable'));
+    const client = await connectServer(createMultiProfileServer(new Map([
+      ['first', first],
+      ['second', second]
+    ]), false));
+    try {
+      await client.listTools();
+      expect(first).not.toHaveBeenCalled();
+      expect(second).not.toHaveBeenCalled();
+
+      const info = (profile: string) =>
+        client.callTool({ name: `${profile}_get_system_info`, arguments: {} });
+      for (const result of await Promise.all([info('first'), info('first')])) {
+        expect(JSON.stringify(result.content)).toContain('First router');
+      }
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).not.toHaveBeenCalled();
+
+      expect((await info('second')).isError).toBe(true);
+      expect(JSON.stringify((await info('second')).content)).toContain('Second router');
+      expect(second).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.close();
+    }
+  });
+});
 
 describe('assembled server over MCP', () => {
   it('advertises every read tool', async () => {

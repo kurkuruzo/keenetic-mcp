@@ -7,8 +7,9 @@
 
 ## Отдельный профиль на каждый роутер
 
-- Профили находятся в `%APPDATA%\keenetic-mcp\<profile>`; каталог выбирает
-  переменная `KEENETIC_CONFIG_DIR` конкретного процесса MCP.
+- Профили находятся в `%APPDATA%\keenetic-mcp\<profile>`. Для мастера и запуска
+  одного профиля каталог задаёт `KEENETIC_CONFIG_DIR`. Для нескольких профилей
+  в Codex каталог каждого задаёт аргумент `--profile имя=абсолютный-путь`.
 - Существующие имена: `osharskaya`, `fuchika`, `fedoseenko`, `almaty`,
   `akzholtai`, `lianozovo`, `brinskogo`. Перед работой проверь текущие каталоги
   и секции `%USERPROFILE%\.codex\config.toml`: это источник актуальных путей.
@@ -45,20 +46,23 @@
    и затем записывает config.json. Дождись успешного завершения пользователем.
    Ошибка мастера не означает созданный профиль. Проверь сохранённый host/login,
    не выводя содержимое хранилища паролей.
-4. Добавь отдельную секцию MCP в `%USERPROFILE%\.codex\config.toml`, сохраняя
-   остальные настройки. Образец структуры (пути сначала проверь на хосте):
+4. Добавь профиль в аргументы общей секции `[mcp_servers.keenetic-routers]`
+   в `%USERPROFILE%\.codex\config.toml`, сохраняя остальные настройки.
+   Образец структуры (пути сначала проверь на хосте):
 
    ```toml
-   [mcp_servers.keenetic-brinskogo]
+   [mcp_servers.keenetic-routers]
    command = 'C:\absolute\path\to\node.exe'
-   args = ['C:\Users\MK\development\keenetic-mcp\dist\index.js']
-
-   [mcp_servers.keenetic-brinskogo.env]
-   KEENETIC_CONFIG_DIR = 'C:\Users\MK\AppData\Roaming\keenetic-mcp\brinskogo'
+   args = [
+     'C:\absolute\path\to\keenetic-mcp\dist\index.js',
+     '--profile', 'osharskaya=C:\Users\MK\AppData\Roaming\keenetic-mcp\osharskaya',
+     '--profile', 'brinskogo=C:\Users\MK\AppData\Roaming\keenetic-mcp\brinskogo',
+   ]
    ```
 
-   У Ошарской историческое имя секции — `keenetic`, у остальных —
-   `keenetic-<profile>`. Секцию существующего роутера повторно не добавляй.
+   Используй префикс профиля в имени инструмента, например
+   `brinskogo_get_system_info`. Старые отдельные секции `keenetic` и
+   `keenetic-<profile>` могут оставаться отключёнными для отката.
 5. Проверь авторизованное чтение модели/прошивки через новый MCP. Если текущий
    чат ещё не видит новые инструменты, проверь RCI локальным клиентом проекта:
    `createSecretStore` + `spawnRunner` из `dist/config/secrets.js`,

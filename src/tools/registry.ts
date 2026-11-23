@@ -11,6 +11,16 @@ export interface ToolContext {
   backup: BackupGuard;
 }
 
+export type ToolScope = ToolContext | {
+  profile: string;
+  readOnly: boolean;
+  getContext: () => Promise<ToolContext>;
+};
+
+export function toolName(scope: ToolScope, name: string): string {
+  return 'profile' in scope ? `${scope.profile}_${name}` : name;
+}
+
 /**
  * The SDK types a tool result structurally and requires an index signature, so
  * a closed interface is not assignable to it. The extra members stay declared
@@ -34,25 +44,27 @@ export function ok(payload: unknown, maxBytes?: number): ToolResult {
  * Every handler funnels failures through here. The text is read by a model, so
  * it must say what happened and what to do next - never a bare stack trace.
  */
-export function fail(error: unknown): ToolResult {
+export function fail(error: unknown, systemInfoTool = 'get_system_info'): ToolResult {
   const text =
     error instanceof KeeneticError
       ? error.message
       : error instanceof Error
-        ? `${error.message} Retry, or call get_system_info to check connectivity.`
-        : `${String(error)} Retry, or call get_system_info to check connectivity.`;
+        ? `${error.message} Retry, or call ${systemInfoTool} to check connectivity.`
+        : `${String(error)} Retry, or call ${systemInfoTool} to check connectivity.`;
   return { content: [{ type: 'text', text }], isError: true };
 }
 
 /** Wraps a handler so it can never reject - the SDK expects a result, not a throw. */
 export function guard<A>(
-  handler: (args: A) => Promise<ToolResult>
+  scope: ToolScope,
+  handler: (ctx: ToolContext, args: A) => Promise<ToolResult>
 ): (args: A) => Promise<ToolResult> {
   return async (args: A) => {
     try {
-      return await handler(args);
+      const ctx = 'getContext' in scope ? await scope.getContext() : scope;
+      return await handler(ctx, args);
     } catch (error) {
-      return fail(error);
+      return fail(error, toolName(scope, 'get_system_info'));
     }
   };
 }

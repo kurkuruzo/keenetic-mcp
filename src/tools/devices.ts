@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { capList } from '../shape/budget.js';
 import { projectDevice } from '../shape/project.js';
-import { fail, guard, ok, READ_ONLY, type ToolContext, type ToolResult } from './registry.js';
+import { fail, guard, ok, READ_ONLY, toolName, type ToolContext, type ToolScope, type ToolResult } from './registry.js';
 import { describeWrite, verifiedWrite } from './write.js';
 
 type HostRecord = Record<string, unknown>;
@@ -38,9 +38,9 @@ async function operationalHost(ctx: ToolContext, mac: string): Promise<HostRecor
   return hosts.find(row => String(row['mac']).toLowerCase() === mac.toLowerCase());
 }
 
-export function registerDeviceTools(server: McpServer, ctx: ToolContext): void {
+export function registerDeviceTools(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'list_devices',
+    toolName(scope, 'list_devices'),
     {
       title: 'List devices on the network',
       description:
@@ -60,7 +60,7 @@ export function registerDeviceTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY
     },
-    guard(async ({ filter, sort, limit }) => {
+    guard(scope, async (ctx, { filter, sort, limit }) => {
       const hosts = await fetchHosts(ctx);
       let devices = hosts.map(projectDevice);
 
@@ -107,7 +107,7 @@ export function registerDeviceTools(server: McpServer, ctx: ToolContext): void {
   );
 
   server.registerTool(
-    'get_device',
+    toolName(scope, 'get_device'),
     {
       title: 'Get one device in full',
       description:
@@ -120,7 +120,7 @@ export function registerDeviceTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY
     },
-    guard(async ({ mac, ip, name }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { mac, ip, name }): Promise<ToolResult> => {
       if (!mac && !ip && !name) {
         return fail(new Error('Supply one of mac, ip or name to identify the device.'));
       }
@@ -149,10 +149,10 @@ export function registerDeviceTools(server: McpServer, ctx: ToolContext): void {
   );
 
   // A read-only server must not advertise what it will refuse to do.
-  if (ctx.readOnly) return;
+  if (scope.readOnly) return;
 
   server.registerTool(
-    'update_device',
+    toolName(scope, 'update_device'),
     {
       title: 'Change a device',
       description:
@@ -169,7 +169,7 @@ export function registerDeviceTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
     },
-    guard(async ({ mac, name, access, policy, schedule, priority }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { mac, name, access, policy, schedule, priority }): Promise<ToolResult> => {
       if (
         name === undefined &&
         access === undefined &&

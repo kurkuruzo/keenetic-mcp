@@ -8,7 +8,7 @@ import {
   STARTUP_CONFIG,
   type LastChange
 } from '../router/config-state.js';
-import { fail, guard, ok, READ_ONLY, type ToolContext, type ToolResult } from './registry.js';
+import { fail, guard, ok, READ_ONLY, toolName, type ToolContext, type ToolScope, type ToolResult } from './registry.js';
 
 /**
  * The router answers the save command with "saving (http/rci)." in the present
@@ -36,9 +36,9 @@ async function waitForSaved(
   return (await readConfigState(ctx.client.rci)).unsavedChanges === false;
 }
 
-export function registerConfigTools(server: McpServer, ctx: ToolContext): void {
+export function registerConfigTools(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'backup_config',
+    toolName(scope, 'backup_config'),
     {
       title: 'Download a configuration backup',
       description:
@@ -50,7 +50,7 @@ export function registerConfigTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY
     },
-    guard(async ({ path }): Promise<ToolResult> => {
+    guard(scope, async (ctx, { path }): Promise<ToolResult> => {
       const text = await ctx.client.rci.getText(STARTUP_CONFIG);
       try {
         await writeFile(path, text, 'utf8');
@@ -66,10 +66,10 @@ export function registerConfigTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  if (ctx.readOnly) return;
+  if (scope.readOnly) return;
 
   server.registerTool(
-    'save_config',
+    toolName(scope, 'save_config'),
     {
       title: 'Save the configuration',
       description:
@@ -79,7 +79,7 @@ export function registerConfigTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
     },
-    guard(async (): Promise<ToolResult> => {
+    guard(scope, async (ctx): Promise<ToolResult> => {
       // Taken before the command so the poll can tell the router has acted.
       const before = await readLastChange(ctx.client.rci);
       await ctx.client.rci.post({ system: { configuration: { save: {} } } });

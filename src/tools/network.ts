@@ -1,15 +1,15 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { capList } from '../shape/budget.js';
-import { guard, ok, READ_ONLY, type ToolContext } from './registry.js';
+import { guard, ok, READ_ONLY, toolName, type ToolScope } from './registry.js';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-export function registerNetworkTools(server: McpServer, ctx: ToolContext): void {
+export function registerNetworkTools(server: McpServer, scope: ToolScope): void {
   server.registerTool(
-    'get_internet_status',
+    toolName(scope, 'get_internet_status'),
     {
       title: 'Internet connectivity',
       description:
@@ -19,7 +19,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
       inputSchema: {},
       annotations: READ_ONLY
     },
-    guard(async () => {
+    guard(scope, async (ctx) => {
       const s = asRecord(await ctx.client.rci.get('show/internet/status'));
       return ok({
         internet: s['internet'] === true,
@@ -34,7 +34,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
   );
 
   server.registerTool(
-    'list_routes',
+    toolName(scope, 'list_routes'),
     {
       title: 'List IP routes',
       description:
@@ -50,7 +50,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
       },
       annotations: READ_ONLY
     },
-    guard(async ({ kind, limit }) => {
+    guard(scope, async (ctx, { kind, limit }) => {
       const raw = await ctx.client.rci.get('show/ip/route');
       const routes = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
       const selected =
@@ -67,7 +67,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
   );
 
   server.registerTool(
-    'list_policies',
+    toolName(scope, 'list_policies'),
     {
       title: 'List routing policies',
       description:
@@ -77,7 +77,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
       inputSchema: {},
       annotations: READ_ONLY
     },
-    guard(async () => {
+    guard(scope, async (ctx) => {
       const raw = asRecord(await ctx.client.rci.get('ip/policy'));
       const policies = Object.entries(raw).map(([name, value]) => {
         const policy = asRecord(value);
@@ -96,7 +96,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
   );
 
   server.registerTool(
-    'get_wifi_status',
+    toolName(scope, 'get_wifi_status'),
     {
       title: 'Wi-Fi status',
       description:
@@ -106,7 +106,7 @@ export function registerNetworkTools(server: McpServer, ctx: ToolContext): void 
       inputSchema: {},
       annotations: READ_ONLY
     },
-    guard(async () => {
+    guard(scope, async (ctx) => {
       const [ifaceRaw, assocRaw] = await Promise.all([
         ctx.client.rci.get('show/interface'),
         ctx.client.rci.get('show/associations')
